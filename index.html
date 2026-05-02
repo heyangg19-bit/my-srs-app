@@ -2,8 +2,8 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>SRS 記憶助手 - 飛書實時版</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>SRS 記憶助手 - 實時同步版</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -16,10 +16,26 @@
         .transform-style-3d { transform-style: preserve-3d; }
         .backface-hidden { backface-visibility: hidden; }
         .rotate-y-180 { transform: rotateY(180deg); }
-        body, html { height: 100vh; margin: 0; background-color: #f8fafc; overflow: hidden; user-select: none; }
-        #root { height: 100%; }
-        .card-grid-layout { display: grid; grid-template-rows: 3.2fr 2.3fr 1.1fr 1.1fr 1.1fr auto; height: 100%; }
-        @media (max-width: 640px) { .card-grid-layout { grid-template-rows: 2.8fr 2.5fr 0.8fr 0.8fr 0.8fr auto; } }
+        
+        body, html { 
+            height: 100%; 
+            margin: 0; 
+            background-color: #f8fafc; 
+            overflow: hidden; 
+            user-select: none;
+            position: fixed;
+            width: 100%;
+        }
+        
+        #root { height: 100%; display: flex; flex-direction: column; }
+        
+        .card-back-grid {
+            display: grid;
+            grid-template-rows: 5fr 2fr 1fr 1fr 1fr auto;
+            height: 100%;
+            width: 100%;
+        }
+
         .animate-pop { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         ::-webkit-scrollbar { display: none; }
@@ -31,15 +47,14 @@
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
 
-        // ========================================================
-        // 🛠️ 請在此填寫你的飛書參數
-        // ========================================================
         const LARK_CONFIG = {
-            APP_ID: 'cli_a97f5cbca1389e15',     // 替換為你的 App ID
-            APP_SECRET: 'dZwAHFAwFdxMBN3ax84QGcct6rB1QGeJ', // 替換為你的 App Secret
-            APP_TOKEN: 'Fwr9bVucfaWRNQsmN0wjEfXqpSR', // 替換為多維表格的 App Token
-            TABLE_ID: 'tblVMg0ADZPVV3WB'      // 替換為資料表的 Table ID
+            APP_ID: 'cli_a97f5cbca1389e15'.trim(),
+            APP_SECRET: 'dZwAHFAwFdxMBN3ax84QGcct6rB1QGeJ'.trim(),
+            APP_TOKEN: 'Fwr9bVucfaWRNQsmN0wjEfXqpSR'.trim(), 
+            TABLE_ID: 'tblVMg0ADZPVV3WB'.trim()              
         };
+
+        const PROXY = "https://cors-anywhere.herokuapp.com/";
 
         const Icon = ({ name, size = 24, className = "" }) => {
             const containerRef = useRef(null);
@@ -53,173 +68,316 @@
         };
 
         const App = () => {
-            const [originalCards, setOriginalCards] = useState([]);
             const [queue, setQueue] = useState([]);
             const [isFlipped, setIsFlipped] = useState(false);
             const [isFinished, setIsFinished] = useState(false);
             const [totalCount, setTotalCount] = useState(0);
             const [loading, setLoading] = useState(false);
+            const [larkToken, setLarkToken] = useState('');
+            const [missingFields, setMissingFields] = useState([]);
 
             const speak = useCallback((text) => {
                 if (!text || !window.speechSynthesis) return;
                 window.speechSynthesis.cancel();
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = /[\u4e00-\u9fa5]/.test(text) ? 'zh-TW' : 'en-US';
-                utterance.rate = 0.85;
+                utterance.rate = 0.95;
                 window.speechSynthesis.speak(utterance);
             }, []);
 
-            // 🚀 從飛書讀取數據
+            const fetchToken = async () => {
+                const res = await fetch(PROXY + 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ app_id: LARK_CONFIG.APP_ID, app_secret: LARK_CONFIG.APP_SECRET })
+                });
+                if (!res.ok) throw new Error(`Token 獲取失敗: ${res.status}`);
+                const data = await res.json();
+                return data.tenant_access_token;
+            };
+
             const syncFromLark = async () => {
                 setLoading(true);
+                setMissingFields([]);
                 try {
-                    // Step 1: 獲取臨時訪問權限 (Tenant Access Token)
-                    const authRes = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            app_id: LARK_CONFIG.APP_ID,
-                            app_secret: LARK_CONFIG.APP_SECRET
-                        })
-                    });
-                    const authData = await authRes.json();
-                    if (!authData.tenant_access_token) throw new Error('飛書授權失敗，請檢查 APP_ID/SECRET');
+                    const token = await fetchToken();
+                    setLarkToken(token);
 
-                    // Step 2: 請求多維表格的所有紀錄
-                    const recordsRes = await fetch(`https://open.feishu.cn/open-apis/bitable/v1/apps/${LARK_CONFIG.APP_TOKEN}/tables/${LARK_CONFIG.TABLE_ID}/records?page_size=500`, {
-                        headers: {
-                            'Authorization': `Bearer ${authData.tenant_access_token}`
-                        }
-                    });
+                    const url = `https://open.feishu.cn/open-apis/bitable/v1/apps/${LARK_CONFIG.APP_TOKEN}/tables/${LARK_CONFIG.TABLE_ID}/records?page_size=500`;
+                    const recordsRes = await fetch(PROXY + url, { headers: { 'Authorization': `Bearer ${token}` } });
+                    
+                    if (!recordsRes.ok) throw new Error(`讀取數據失敗 (${recordsRes.status})`);
                     const recordsData = await recordsRes.json();
                     
-                    if (recordsData.code !== 0) throw new Error(recordsData.msg || '無法讀取表格內容');
-
                     const items = recordsData.data.items || [];
+                    if (items.length === 0) throw new Error("表格為空，請確認飛書內容。");
+
+                    const rawFields = Object.keys(items[0].fields);
+                    const findField = (possibilities) => {
+                        return rawFields.find(f => {
+                            const cleanF = f.replace(/[\s_]/g, '').toLowerCase();
+                            return possibilities.some(p => cleanF === p.replace(/[\s_]/g, '').toLowerCase());
+                        });
+                    };
+                    
+                    const fieldMap = {
+                        word: findField(['單詞', '單字', 'Word']),
+                        pos: findField(['詞性', 'POS']),
+                        translation: findField(['中文翻譯', '解釋', 'Translation', '中文', '含義']),
+                        inflection: findField(['詞性變化', '變化', 'Inflection']),
+                        collocation: findField(['搭配詞', '搭配', 'Collocation']),
+                        example: findField(['例句', 'Sentence', 'Example']),
+                        rank: findField(['Rank', '記憶權重']),
+                        testTimes: findField(['TestTimes', '測試次數', 'No']), 
+                        lastCheck: findField(['Last', 'LastCheck', '最後檢查']),
+                        nextReview: findField(['Next', 'NextReview', '下一次複習'])
+                    };
+
+                    if (!fieldMap.word) throw new Error("找不到『單詞』欄位。");
+
+                    const missing = [];
+                    if (!fieldMap.rank) missing.push("Rank");
+                    if (!fieldMap.nextReview) missing.push("Next");
+                    if (!fieldMap.testTimes) missing.push("TestTimes");
+                    
+                    if (missing.length > 0) {
+                        setMissingFields(missing);
+                    }
+
                     const parsed = items.map(item => ({
-                        id: item.record_id,
-                        word: item.fields["單詞"] || 'Empty',
-                        pos: item.fields["詞性"] || '',
-                        translation: item.fields["中文翻譯"] || '',
-                        inflection: item.fields["詞性變化"] || '',
-                        collocation: item.fields["搭配詞"] || '',
-                        example: item.fields["例句"] || ''
-                    })).filter(c => c.word !== 'Empty');
+                        record_id: item.record_id.trim(), 
+                        word: item.fields[fieldMap.word] || '',
+                        pos: item.fields[fieldMap.pos] || '',
+                        translation: item.fields[fieldMap.translation] || '',
+                        inflection: item.fields[fieldMap.inflection] || '',
+                        collocation: item.fields[fieldMap.collocation] || '',
+                        example: item.fields[fieldMap.example] || '',
+                        rank: parseFloat(item.fields[fieldMap.rank]) || 1,
+                        testTimes: parseInt(item.fields[fieldMap.testTimes]) || 0,
+                        lastCheck: item.fields[fieldMap.lastCheck] || null,
+                        nextReview: item.fields[fieldMap.nextReview] || null,
+                        fieldNames: fieldMap 
+                    })).filter(c => c.word && c.record_id);
 
-                    if (parsed.length === 0) throw new Error('表格裡空空如也，快去填寫單字吧！');
+                    const today = new Date().setHours(0,0,0,0);
+                    const filtered = parsed.filter(card => {
+                        if (!card.nextReview) return true; 
+                        return new Date(card.nextReview).getTime() <= today;
+                    });
 
-                    setOriginalCards(parsed);
-                    setQueue([...parsed].sort(() => Math.random() - 0.5)); // 隨機洗牌
-                    setTotalCount(parsed.length);
+                    setQueue([...filtered].sort(() => Math.random() - 0.5));
+                    setTotalCount(filtered.length);
                     setIsFinished(false);
                     setIsFlipped(false);
                 } catch (error) {
-                    console.error(error);
-                    alert('❌ 同步失敗: ' + error.message);
+                    alert('同步錯誤：' + error.message);
                 } finally {
                     setLoading(false);
                 }
             };
 
-            const handleSRS = useCallback((type) => {
+            const updateLarkRecord = async (card, type) => {
+                if (!card.fieldNames.rank || !card.fieldNames.nextReview) return;
+
+                let currentToken = larkToken;
+                if (!currentToken) {
+                    try { currentToken = await fetchToken(); setLarkToken(currentToken); } catch (e) { return; }
+                }
+
+                const now = new Date();
+                const todayMidnight = new Date().setHours(0,0,0,0);
+                let newRank = card.rank;
+                let daysToAdd = 0;
+
+                switch(type) {
+                    case 'easy': newRank += 1.0; daysToAdd = 4; break;
+                    case 'good': newRank += 0.2; daysToAdd = 2; break;
+                    case 'hard': newRank -= 0.5; daysToAdd = 1; break;
+                    case 'again': newRank -= 1.0; daysToAdd = 0; break;
+                }
+
+                newRank = Math.max(1, Math.min(7, Math.round(newRank * 10) / 10));
+                const nextReviewVal = Number(todayMidnight + (daysToAdd * 24 * 60 * 60 * 1000));
+                
+                const fieldsToUpdate = {
+                    [card.fieldNames.rank]: Number(newRank),
+                    [card.fieldNames.nextReview]: nextReviewVal
+                };
+
+                // 更新測試次數 (TestTimes)
+                if (card.fieldNames.testTimes) {
+                    fieldsToUpdate[card.fieldNames.testTimes] = Number((card.testTimes || 0) + 1);
+                }
+                
+                if (card.fieldNames.lastCheck) {
+                    fieldsToUpdate[card.fieldNames.lastCheck] = Number(now.getTime());
+                }
+
+                try {
+                    await fetch(PROXY + `https://open.feishu.cn/open-apis/bitable/v1/apps/${LARK_CONFIG.APP_TOKEN}/tables/${LARK_CONFIG.TABLE_ID}/records/${card.record_id}`, {
+                        method: 'PUT',
+                        headers: { 'Authorization': `Bearer ${currentToken.trim()}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ fields: fieldsToUpdate })
+                    });
+                } catch (e) { console.error("回寫失敗:", e); }
+            };
+
+            const handleSRS = useCallback(async (type) => {
+                if (queue.length === 0) return;
                 const [head, ...tail] = queue;
+                
+                // 本地執行 +1
+                head.testTimes = (head.testTimes || 0) + 1;
+                
+                // 發送回寫請求
+                updateLarkRecord(head, type);
+                
                 let newQueue = [...tail];
-                if (type === 'again') newQueue.splice(1, 0, head); // 很快再次出現
-                else if (type === 'hard') newQueue.splice(Math.min(5, newQueue.length), 0, head); // 稍後出現
+                if (type === 'again') newQueue.splice(Math.min(3, newQueue.length), 0, head);
                 
                 if (newQueue.length === 0) setIsFinished(true);
                 else { setQueue(newQueue); setIsFlipped(false); }
-            }, [queue]);
+            }, [queue, larkToken]);
 
             useEffect(() => {
-                const handleKeyDown = (e) => {
-                    if (isFinished || queue.length === 0) return;
-                    if (e.code === 'Space') { e.preventDefault(); setIsFlipped(!isFlipped); }
-                    if (isFlipped && ['1','2','3','4'].includes(e.key)) {
-                        handleSRS(['again', 'hard', 'good', 'easy'][parseInt(e.key)-1]);
-                    }
-                };
-                window.addEventListener('keydown', handleKeyDown);
-                return () => window.removeEventListener('keydown', handleKeyDown);
-            }, [isFlipped, isFinished, queue, handleSRS]);
+                if (queue.length > 0 && !isFinished) {
+                    const current = queue[0];
+                    if (!isFlipped) speak(current.word);
+                    else speak(current.example.split('(')[0]);
+                }
+            }, [queue[0], isFlipped, isFinished, speak]);
 
             const progress = totalCount > 0 ? ((totalCount - queue.length) / totalCount) * 100 : 0;
             const currentCard = queue[0];
 
             if (isFinished) {
                 return (
-                    <div className="h-full flex items-center justify-center p-6 bg-slate-50">
-                        <div className="bg-white p-12 rounded-[3.5rem] shadow-2xl max-w-md w-full text-center border-4 border-indigo-100 animate-pop">
-                            <Icon name="party-popper" size={80} className="text-indigo-500 mx-auto mb-6" />
-                            <h2 className="text-4xl font-black mb-4 text-slate-800">複習完成！</h2>
-                            <p className="text-slate-400 mb-8">所有的飛書單字都已消化完畢。</p>
-                            <button onClick={() => setQueue([...originalCards])} className="w-full py-5 bg-indigo-600 text-white rounded-3xl font-black shadow-xl shadow-indigo-200">再次啟動</button>
+                    <div className="h-full flex items-center justify-center p-6 bg-slate-50 text-center">
+                        <div className="bg-white p-10 rounded-[3rem] shadow-2xl w-full max-w-sm border border-slate-100 animate-pop">
+                            <Icon name="check-circle" size={64} className="text-green-500 mx-auto mb-4" />
+                            <h2 className="text-3xl font-black text-slate-800">複習完畢</h2>
+                            <p className="mt-2 text-slate-400 text-sm italic">數據已同步至 TestTimes 欄位</p>
+                            <button onClick={() => window.location.reload()} className="mt-8 w-full py-4 bg-indigo-600 text-white rounded-2xl font-black transition-transform active:scale-95 shadow-lg shadow-indigo-200">返回</button>
                         </div>
                     </div>
                 );
             }
 
             return (
-                <div className="h-full flex flex-col p-6 max-w-4xl mx-auto">
-                    {/* Top UI */}
-                    <div className="flex-none flex justify-between items-center mb-6">
-                        <div className="flex items-center gap-3">
-                            <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg"><Icon name="database" className="text-white" /></div>
-                            <span className="text-2xl font-black text-slate-800 tracking-tighter">LARK SRS</span>
+                <div className="h-full flex flex-col p-4 w-full max-w-md mx-auto">
+                    {/* Header */}
+                    <div className="flex justify-between items-center mb-4 px-1 flex-none">
+                        <div className="flex flex-col text-left">
+                            <h1 className="text-lg font-black text-indigo-600 flex items-center gap-1.5"><Icon name="shield-check" size={20} className="fill-current" /> SRS AUTH</h1>
+                            <span className="text-[8px] font-bold text-slate-300 uppercase tracking-widest leading-none">Syncing with TestTimes</span>
                         </div>
-                        <button onClick={syncFromLark} disabled={loading} className="px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold flex items-center gap-2 shadow-lg shadow-indigo-100 disabled:bg-slate-300">
-                            <Icon name={loading ? "loader-2" : "refresh-cw"} className={loading ? "animate-spin" : ""} size={18} />
-                            {loading ? "讀取中..." : "同步飛書"}
+                        <button onClick={syncFromLark} disabled={loading} className="px-4 py-2 bg-indigo-600 text-white rounded-full text-[10px] font-black flex items-center gap-1.5 shadow-md disabled:opacity-50 active:scale-95 transition-all">
+                            <Icon name={loading ? "loader-2" : "refresh-cw"} className={loading ? "animate-spin" : ""} size={12} />
+                            {loading ? "同步中" : "雲端載入"}
                         </button>
                     </div>
 
-                    <div className="flex-1 flex flex-col justify-center items-center w-full min-h-0">
-                        {queue.length > 0 ? (
-                            <div className="w-full max-w-xl h-full flex flex-col min-h-0">
-                                <div className="mb-4">
-                                    <div className="flex justify-between mb-2"><span className="text-[10px] font-black text-slate-300 tracking-widest">PROGRESS</span><span className="text-xs text-indigo-500 font-black">{totalCount - queue.length} / {totalCount}</span></div>
-                                    <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden border border-white"><div className="bg-indigo-500 h-full transition-all duration-700" style={{ width: `${progress}%` }}></div></div>
-                                </div>
-                                
-                                <div className="flex-1 relative perspective-1000 mb-8" onClick={() => setIsFlipped(!isFlipped)}>
-                                    <div className={`relative w-full h-full cursor-pointer transition-all duration-700 transform-style-3d ${isFlipped ? 'rotate-y-180' : ''}`}>
-                                        {/* 正面 */}
-                                        <div className="absolute w-full h-full backface-hidden bg-white rounded-[4rem] shadow-2xl flex flex-col items-center justify-center p-12 border border-white/50">
-                                            <h2 className="text-7xl font-black text-slate-800 mb-10 tracking-tighter text-center break-words">{currentCard.word}</h2>
-                                            <button onClick={(e) => { e.stopPropagation(); speak(currentCard.word); }} className="w-20 h-20 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center hover:scale-110 transition-transform"><Icon name="mic-2" size={30}/></button>
-                                            <p className="absolute bottom-10 text-[10px] font-black text-slate-200 tracking-widest">TAP TO REVEAL</p>
-                                        </div>
+                    {/* Alerts */}
+                    {missingFields.length > 0 && (
+                        <div className="mb-4 p-3 bg-rose-50 border border-rose-100 rounded-2xl text-[10px] text-rose-600 font-medium animate-pulse text-left">
+                            <p className="font-black flex items-center gap-1 mb-1"><Icon name="alert-circle" size={12}/> 警告：欄位匹配失敗</p>
+                            <p>找不到：<span className="font-mono bg-white px-1 rounded">{missingFields.join(", ")}</span></p>
+                        </div>
+                    )}
 
-                                        {/* 反面 */}
-                                        <div className="absolute w-full h-full backface-hidden bg-white rounded-[4rem] rotate-y-180 flex flex-col shadow-2xl border border-white overflow-hidden">
-                                            <div className="card-grid-layout">
-                                                <div className="bg-slate-200 overflow-hidden"><img src={`https://loremflickr.com/800/600/${encodeURIComponent(currentCard.word)}`} className="w-full h-full object-cover" /></div>
-                                                <div className="px-10 py-6"><span className="px-2 py-1 bg-indigo-600 text-white text-[10px] font-black rounded mb-2 inline-block uppercase">{currentCard.pos}</span><h3 className="text-4xl font-black text-slate-800">{currentCard.translation}</h3></div>
-                                                <div className="px-10 border-t border-slate-50 flex items-center text-sm"><span className="text-[9px] font-black text-slate-300 w-24 uppercase tracking-tighter">Variations</span><span className="text-slate-600">{currentCard.inflection || 'N/A'}</span></div>
-                                                <div className="px-10 border-t border-slate-50 flex items-center text-sm"><span className="text-[9px] font-black text-slate-300 w-24 uppercase tracking-tighter">Usage</span><span className="text-indigo-600 font-bold">{currentCard.collocation || 'N/A'}</span></div>
-                                                <div className="px-10 border-t border-slate-50 flex items-center italic text-slate-500 text-[14px]">"{currentCard.example}"</div>
-                                                <div className="p-6 bg-slate-50/50 grid grid-cols-4 gap-3" onClick={e => e.stopPropagation()}>
-                                                    {['Again', 'Hard', 'Good', 'Easy'].map((l, i) => (
-                                                        <button key={l} onClick={() => handleSRS(l.toLowerCase())} className="py-3 bg-white border border-slate-200 rounded-2xl flex flex-col items-center group active:scale-95 transition-all">
-                                                            <span className="text-[10px] font-black uppercase text-indigo-500">{l}</span>
-                                                            <span className="text-[9px] font-bold text-slate-300 group-hover:text-indigo-300">{i+1}</span>
-                                                        </button>
-                                                    ))}
+                    {queue.length > 0 ? (
+                        <div className="flex-1 flex flex-col min-h-0">
+                            {/* Progress */}
+                            <div className="mb-4 flex-none px-1">
+                                <div className="flex justify-between text-[9px] font-black text-slate-400 mb-1.5 uppercase tracking-tighter">
+                                    <span>Progress: {totalCount - queue.length}/{totalCount}</span>
+                                    <span className="text-indigo-400">Rank: {currentCard.rank}</span>
+                                </div>
+                                <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden shadow-inner">
+                                    <div className="bg-indigo-500 h-full transition-all duration-700" style={{ width: `${progress}%` }}></div>
+                                </div>
+                            </div>
+
+                            {/* Card Container */}
+                            <div className="flex-1 relative perspective-1000 mb-4" onClick={() => setIsFlipped(!isFlipped)}>
+                                <div className={`relative w-full h-full transition-all duration-500 transform-style-3d shadow-xl rounded-[2.5rem] ${isFlipped ? 'rotate-y-180' : ''}`}>
+                                    
+                                    {/* Card Front */}
+                                    <div className="absolute w-full h-full backface-hidden bg-white rounded-[2.5rem] flex flex-col items-center justify-center p-6 border border-slate-100">
+                                        {/* TestTimes Badge */}
+                                        <div className="absolute top-6 left-6 flex items-center gap-1 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-100">
+                                            <Icon name="bar-chart-3" size={12} className="text-indigo-400" />
+                                            <span className="text-[10px] font-black text-slate-500 uppercase tracking-tighter">TestTimes: {currentCard.testTimes}</span>
+                                        </div>
+                                        
+                                        <h2 className="text-5xl font-black text-slate-800 text-center break-words leading-tight">{currentCard.word}</h2>
+                                        
+                                        <div className="mt-10">
+                                            <button onClick={(e) => { e.stopPropagation(); speak(currentCard.word); }} className="p-5 rounded-full bg-indigo-50 text-indigo-500 active:scale-90 transition-transform shadow-sm border border-indigo-100">
+                                                <Icon name="volume-2" size={36}/>
+                                            </button>
+                                        </div>
+                                        <p className="absolute bottom-8 text-[9px] font-black text-slate-200 uppercase tracking-[0.3em] animate-pulse">TAP TO FLIP</p>
+                                    </div>
+
+                                    {/* Card Back */}
+                                    <div className="absolute w-full h-full backface-hidden bg-white rounded-[2.5rem] rotate-y-180 border border-slate-100 overflow-hidden text-left shadow-2xl">
+                                        <div className="card-back-grid">
+                                            <div className="bg-slate-100 overflow-hidden relative">
+                                                <img src={`https://loremflickr.com/600/400/${encodeURIComponent(currentCard.word)}`} className="w-full h-full object-cover grayscale-[0.2] contrast-125" alt="Visual"/>
+                                                <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-md px-3 py-1 rounded-full text-[9px] text-slate-800 font-black shadow-sm">
+                                                    #{currentCard.testTimes} Times Tested
                                                 </div>
+                                            </div>
+                                            
+                                            <div className="px-6 flex flex-col justify-center border-b border-slate-50 bg-white">
+                                                <span className="px-2 py-0.5 bg-indigo-600 text-white text-[9px] font-black rounded-lg mb-1 inline-block w-fit uppercase">{currentCard.pos}</span>
+                                                <h3 className="text-2xl font-black text-slate-800 leading-tight">{currentCard.translation}</h3>
+                                            </div>
+
+                                            <div className="px-6 flex items-center border-b border-slate-50 bg-white text-[11px]">
+                                                <span className="text-[9px] font-black text-slate-300 w-16 flex-none uppercase tracking-tighter">Inflection</span>
+                                                <span className="text-slate-600 italic truncate font-bold">{currentCard.inflection || '-'}</span>
+                                            </div>
+                                            
+                                            <div className="px-6 flex items-center border-b border-slate-50 bg-white text-indigo-600 text-[11px]">
+                                                <span className="text-[9px] font-black text-slate-300 w-16 flex-none uppercase tracking-tighter">Collocation</span>
+                                                <span className="truncate font-black">{currentCard.collocation || '-'}</span>
+                                            </div>
+
+                                            <div className="px-6 flex items-center bg-indigo-50/20 relative overflow-hidden">
+                                                <p className="italic text-slate-500 text-[10px] leading-relaxed line-clamp-2 pr-10 font-bold">"{currentCard.example}"</p>
+                                                <button onClick={(e) => {e.stopPropagation(); speak(currentCard.example.split('(')[0]);}} className="absolute right-5 text-indigo-400 active:scale-90 transition-all p-2 bg-white rounded-full shadow-sm">
+                                                    <Icon name="volume-2" size={16}/>
+                                                </button>
+                                            </div>
+
+                                            {/* SRS Buttons */}
+                                            <div className="p-3 bg-white border-t border-slate-100 grid grid-cols-4 gap-2 flex-none" onClick={e => e.stopPropagation()}>
+                                                {['Again', 'Hard', 'Good', 'Easy'].map((l, i) => (
+                                                    <button key={l} onClick={() => handleSRS(l.toLowerCase())} className="py-4 bg-slate-50 border border-slate-100 rounded-2xl flex flex-col items-center active:bg-indigo-600 active:text-white transition-all group active:shadow-indigo-200 active:shadow-lg">
+                                                        <span className="text-[9px] font-black uppercase text-indigo-500 group-active:text-white leading-none tracking-tighter">{l}</span>
+                                                        <span className="text-[11px] font-black text-slate-300 mt-1.5 group-active:text-white/60 leading-none">{i+1}</span>
+                                                    </button>
+                                                ))}
                                             </div>
                                         </div>
                                     </div>
                                 </div>
                             </div>
-                        ) : (
-                            <div className="bg-white p-20 rounded-[5rem] border-4 border-dashed border-slate-100 text-center max-w-lg shadow-sm">
-                                <div className="w-24 h-24 bg-indigo-50 rounded-[3rem] flex items-center justify-center mx-auto mb-8"><Icon name="link-2" size={40} className="text-indigo-400" /></div>
-                                <h3 className="text-2xl font-black text-slate-800 mb-2">連結至飛書數據</h3>
-                                <p className="text-slate-400 text-sm mb-10">點擊上方按鈕開始同步您的多維表格單字庫</p>
-                                <button onClick={syncFromLark} className="w-full py-5 bg-indigo-600 text-white rounded-[2rem] font-black text-lg shadow-xl shadow-indigo-100 active:scale-95 transition-all">立即同步</button>
+                        </div>
+                    ) : (
+                        <div className="flex-1 flex items-center justify-center">
+                             <div className="bg-white p-10 rounded-[3rem] border-2 border-dashed border-slate-200 text-center w-full animate-pop">
+                                <div className="w-20 h-20 bg-indigo-50 rounded-[2rem] flex items-center justify-center mx-auto mb-8 shadow-inner shadow-indigo-100/50">
+                                    <Icon name="database" size={40} className="text-indigo-500" />
+                                </div>
+                                <h3 className="text-xl font-black text-slate-800 mb-2 tracking-tight">數據鏈結中</h3>
+                                <p className="text-slate-400 text-[10px] mb-10 font-bold italic tracking-tighter text-center uppercase">Target Fields: Word, Translation, TestTimes, Rank, Next, Last</p>
+                                <button onClick={syncFromLark} className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-xl shadow-indigo-100 transition-transform active:scale-95 tracking-widest text-sm">點擊同步資料</button>
                             </div>
-                        )}
-                    </div>
+                        </div>
+                    )}
                 </div>
             );
         };
