@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>SRS 記憶助手 - 實時同步版</title>
+    <title>SRS 記憶助手 - AI 增強版</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -12,40 +12,77 @@
     <script src="https://unpkg.com/lucide@latest"></script>
     
     <style>
-        .perspective-1000 { perspective: 1000px; }
-        .transform-style-3d { transform-style: preserve-3d; }
-        .backface-hidden { backface-visibility: hidden; }
-        .rotate-y-180 { transform: rotateY(180deg); }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=Noto+Sans+TC:wght@400;700;900&display=swap');
         
+        :root {
+            --primary: #4f46e5;
+            --primary-dark: #4338ca;
+        }
+
         body, html { 
             height: 100%; 
             margin: 0; 
-            background-color: #f8fafc; 
+            background-color: #f1f5f9; 
             overflow: hidden; 
             user-select: none;
             position: fixed;
             width: 100%;
+            font-family: 'Inter', 'Noto Sans TC', sans-serif;
         }
         
         #root { height: 100%; display: flex; flex-direction: column; }
         
-        .card-back-grid {
-            display: grid;
-            grid-template-rows: 5fr 2fr 1fr 1fr 1fr auto;
+        .perspective-1000 { perspective: 1200px; }
+        .transform-style-3d { transform-style: preserve-3d; transition: transform 0.6s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        .backface-hidden { backface-visibility: hidden; }
+        .rotate-y-180 { transform: rotateY(180deg); }
+        
+        /* 修正佈局：讓中間內容區可滾動 */
+        .card-back-container {
+            display: flex;
+            flex-direction: column;
             height: 100%;
             width: 100%;
         }
 
-        .animate-pop { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        ::-webkit-scrollbar { display: none; }
+        .content-scroll-area {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .animate-pop { animation: pop 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        @keyframes pop { 
+            from { opacity: 0; transform: scale(0.95) translateY(10px); } 
+            to { opacity: 1; transform: scale(1) translateY(0); } 
+        }
+
+        .srs-btn-active { transform: scale(0.95); background-color: var(--primary); color: white !important; }
+        
+        .custom-scroll::-webkit-scrollbar { width: 4px; }
+        .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+
+        /* AI 展開動畫優化 */
+        .ai-expand {
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            max-height: 0;
+            opacity: 0;
+            overflow: hidden;
+        }
+        .ai-expand.show {
+            max-height: 500px; /* 增加最大高度確保內容不被截斷 */
+            opacity: 1;
+            padding-bottom: 16px;
+        }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useCallback, useRef } = React;
+        const { useState, useEffect, useCallback, useRef, useMemo } = React;
 
         const LARK_CONFIG = {
             APP_ID: 'cli_a97f5cbca1389e15'.trim(),
@@ -55,6 +92,34 @@
         };
 
         const PROXY = "https://cors-anywhere.herokuapp.com/";
+        const GEMINI_API_KEY = ""; 
+
+        const callGemini = async (prompt, systemPrompt = "") => {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] }
+            };
+            const fetchWithRetry = async (retries = 5, delay = 1000) => {
+                try {
+                    const res = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!res.ok) throw new Error(`API Error: ${res.status}`);
+                    const data = await res.json();
+                    return data.candidates?.[0]?.content?.parts?.[0]?.text || "無法生成內容";
+                } catch (err) {
+                    if (retries > 0) {
+                        await new Promise(r => setTimeout(r, delay));
+                        return fetchWithRetry(retries - 1, delay * 2);
+                    }
+                    throw err;
+                }
+            };
+            return fetchWithRetry();
+        };
 
         const Icon = ({ name, size = 24, className = "" }) => {
             const containerRef = useRef(null);
@@ -74,14 +139,19 @@
             const [totalCount, setTotalCount] = useState(0);
             const [loading, setLoading] = useState(false);
             const [larkToken, setLarkToken] = useState('');
-            const [missingFields, setMissingFields] = useState([]);
+            const [lastAction, setLastAction] = useState(null);
+            
+            const [aiTip, setAiTip] = useState(null);
+            const [aiLoading, setAiLoading] = useState(false);
+            const [showAi, setShowAi] = useState(false);
 
             const speak = useCallback((text) => {
                 if (!text || !window.speechSynthesis) return;
                 window.speechSynthesis.cancel();
                 const utterance = new SpeechSynthesisUtterance(text);
-                utterance.lang = /[\u4e00-\u9fa5]/.test(text) ? 'zh-TW' : 'en-US';
-                utterance.rate = 0.95;
+                const isChinese = /[\u4e00-\u9fa5]/.test(text);
+                utterance.lang = isChinese ? 'zh-TW' : 'en-US';
+                utterance.rate = isChinese ? 1.0 : 0.85;
                 window.speechSynthesis.speak(utterance);
             }, []);
 
@@ -91,34 +161,25 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ app_id: LARK_CONFIG.APP_ID, app_secret: LARK_CONFIG.APP_SECRET })
                 });
-                if (!res.ok) throw new Error(`Token 獲取失敗: ${res.status}`);
                 const data = await res.json();
                 return data.tenant_access_token;
             };
 
             const syncFromLark = async () => {
                 setLoading(true);
-                setMissingFields([]);
                 try {
                     const token = await fetchToken();
                     setLarkToken(token);
-
                     const url = `https://open.feishu.cn/open-apis/bitable/v1/apps/${LARK_CONFIG.APP_TOKEN}/tables/${LARK_CONFIG.TABLE_ID}/records?page_size=500`;
                     const recordsRes = await fetch(PROXY + url, { headers: { 'Authorization': `Bearer ${token}` } });
-                    
-                    if (!recordsRes.ok) throw new Error(`讀取數據失敗 (${recordsRes.status})`);
                     const recordsData = await recordsRes.json();
+                    const items = recordsData.data?.items || [];
                     
-                    const items = recordsData.data.items || [];
-                    if (items.length === 0) throw new Error("表格為空，請確認飛書內容。");
-
                     const rawFields = Object.keys(items[0].fields);
-                    const findField = (possibilities) => {
-                        return rawFields.find(f => {
-                            const cleanF = f.replace(/[\s_]/g, '').toLowerCase();
-                            return possibilities.some(p => cleanF === p.replace(/[\s_]/g, '').toLowerCase());
-                        });
-                    };
+                    const findField = (possibilities) => rawFields.find(f => {
+                        const cleanF = f.replace(/[\s_]/g, '').toLowerCase();
+                        return possibilities.some(p => cleanF === p.replace(/[\s_]/g, '').toLowerCase());
+                    });
                     
                     const fieldMap = {
                         word: findField(['單詞', '單字', 'Word']),
@@ -127,25 +188,14 @@
                         inflection: findField(['詞性變化', '變化', 'Inflection']),
                         collocation: findField(['搭配詞', '搭配', 'Collocation']),
                         example: findField(['例句', 'Sentence', 'Example']),
-                        rank: findField(['Rank', '記憶權重']),
-                        testTimes: findField(['TestTimes', '測試次數', 'No']), 
-                        lastCheck: findField(['Last', 'LastCheck', '最後檢查']),
-                        nextReview: findField(['Next', 'NextReview', '下一次複習'])
+                        rank: findField(['Rank', '記憶權重', '權重']),
+                        testTimes: findField(['TestTimes', '測試次數', '次數', 'times']), 
+                        lastCheck: findField(['Last', 'LastCheck', '最後複習']),
+                        nextReview: findField(['Next', 'NextReview', '下次複習'])
                     };
 
-                    if (!fieldMap.word) throw new Error("找不到『單詞』欄位。");
-
-                    const missing = [];
-                    if (!fieldMap.rank) missing.push("Rank");
-                    if (!fieldMap.nextReview) missing.push("Next");
-                    if (!fieldMap.testTimes) missing.push("TestTimes");
-                    
-                    if (missing.length > 0) {
-                        setMissingFields(missing);
-                    }
-
                     const parsed = items.map(item => ({
-                        record_id: item.record_id.trim(), 
+                        record_id: item.record_id, 
                         word: item.fields[fieldMap.word] || '',
                         pos: item.fields[fieldMap.pos] || '',
                         translation: item.fields[fieldMap.translation] || '',
@@ -154,110 +204,112 @@
                         example: item.fields[fieldMap.example] || '',
                         rank: parseFloat(item.fields[fieldMap.rank]) || 1,
                         testTimes: parseInt(item.fields[fieldMap.testTimes]) || 0,
-                        lastCheck: item.fields[fieldMap.lastCheck] || null,
                         nextReview: item.fields[fieldMap.nextReview] || null,
                         fieldNames: fieldMap 
-                    })).filter(c => c.word && c.record_id);
+                    })).filter(c => c.word);
 
                     const today = new Date().setHours(0,0,0,0);
-                    const filtered = parsed.filter(card => {
-                        if (!card.nextReview) return true; 
-                        return new Date(card.nextReview).getTime() <= today;
-                    });
+                    const filtered = parsed.filter(card => !card.nextReview || new Date(card.nextReview).getTime() <= today);
 
                     setQueue([...filtered].sort(() => Math.random() - 0.5));
                     setTotalCount(filtered.length);
                     setIsFinished(false);
                     setIsFlipped(false);
                 } catch (error) {
-                    alert('同步錯誤：' + error.message);
+                    console.error(error);
                 } finally {
                     setLoading(false);
                 }
             };
 
-            const updateLarkRecord = async (card, type) => {
-                if (!card.fieldNames.rank || !card.fieldNames.nextReview) return;
-
-                let currentToken = larkToken;
-                if (!currentToken) {
-                    try { currentToken = await fetchToken(); setLarkToken(currentToken); } catch (e) { return; }
+            const handleAiEnhance = async (e) => {
+                e.stopPropagation();
+                if (aiLoading) return;
+                
+                if (aiTip) {
+                    setShowAi(!showAi);
+                    return;
                 }
 
+                setAiLoading(true);
+                setShowAi(true);
+                const current = queue[0];
+                try {
+                    const result = await callGemini(
+                        `請為單詞 "${current.word}" (${current.pos}) 提供一個趣味記憶法或口訣。要求簡潔，並包含中文意思 "${current.translation}"。`,
+                        "你是一位語言學習專家，擅長用創意聯想法幫助學生記憶單詞。回應請簡短精煉。"
+                    );
+                    setAiTip(result);
+                } catch (err) {
+                    setAiTip("AI 暫時休息中，請點擊重試。");
+                } finally {
+                    setAiLoading(false);
+                }
+            };
+
+            const updateLarkRecord = async (card, type) => {
+                if (!card.fieldNames.rank || !card.fieldNames.nextReview) return;
+                let currentToken = larkToken || await fetchToken();
                 const now = new Date();
-                const todayMidnight = new Date().setHours(0,0,0,0);
                 let newRank = card.rank;
                 let daysToAdd = 0;
-
                 switch(type) {
-                    case 'easy': newRank += 1.0; daysToAdd = 4; break;
-                    case 'good': newRank += 0.2; daysToAdd = 2; break;
+                    case 'easy': newRank += 1.0; daysToAdd = 7; break;
+                    case 'good': newRank += 0.3; daysToAdd = 3; break;
                     case 'hard': newRank -= 0.5; daysToAdd = 1; break;
                     case 'again': newRank -= 1.0; daysToAdd = 0; break;
                 }
-
-                newRank = Math.max(1, Math.min(7, Math.round(newRank * 10) / 10));
-                const nextReviewVal = Number(todayMidnight + (daysToAdd * 24 * 60 * 60 * 1000));
-                
-                const fieldsToUpdate = {
+                newRank = Math.max(1, Math.min(10, Math.round(newRank * 10) / 10));
+                const nextReviewVal = Number(new Date().setHours(0,0,0,0) + (daysToAdd * 24 * 60 * 60 * 1000));
+                const fields = {
                     [card.fieldNames.rank]: Number(newRank),
-                    [card.fieldNames.nextReview]: nextReviewVal
+                    [card.fieldNames.nextReview]: nextReviewVal,
+                    [card.fieldNames.testTimes]: Number((card.testTimes || 0) + 1),
+                    [card.fieldNames.lastCheck]: Number(now.getTime())
                 };
-
-                // 更新測試次數 (TestTimes)
-                if (card.fieldNames.testTimes) {
-                    fieldsToUpdate[card.fieldNames.testTimes] = Number((card.testTimes || 0) + 1);
-                }
-                
-                if (card.fieldNames.lastCheck) {
-                    fieldsToUpdate[card.fieldNames.lastCheck] = Number(now.getTime());
-                }
-
                 try {
                     await fetch(PROXY + `https://open.feishu.cn/open-apis/bitable/v1/apps/${LARK_CONFIG.APP_TOKEN}/tables/${LARK_CONFIG.TABLE_ID}/records/${card.record_id}`, {
                         method: 'PUT',
-                        headers: { 'Authorization': `Bearer ${currentToken.trim()}`, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ fields: fieldsToUpdate })
+                        headers: { 'Authorization': `Bearer ${currentToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ fields })
                     });
-                } catch (e) { console.error("回寫失敗:", e); }
+                } catch (e) {}
             };
 
-            const handleSRS = useCallback(async (type) => {
-                if (queue.length === 0) return;
+            const handleSRS = useCallback((type) => {
+                if (queue.length === 0 || !isFlipped) return;
+                setLastAction(type);
+                setAiTip(null); 
+                setShowAi(false);
+                setTimeout(() => setLastAction(null), 300);
                 const [head, ...tail] = queue;
-                
-                // 本地執行 +1
-                head.testTimes = (head.testTimes || 0) + 1;
-                
-                // 發送回寫請求
                 updateLarkRecord(head, type);
-                
                 let newQueue = [...tail];
-                if (type === 'again') newQueue.splice(Math.min(3, newQueue.length), 0, head);
-                
+                if (type === 'again') {
+                    const updatedHead = { ...head, testTimes: head.testTimes + 1 };
+                    newQueue.splice(Math.min(3, newQueue.length), 0, updatedHead);
+                }
                 if (newQueue.length === 0) setIsFinished(true);
                 else { setQueue(newQueue); setIsFlipped(false); }
-            }, [queue, larkToken]);
+            }, [queue, isFlipped, larkToken]);
 
             useEffect(() => {
-                if (queue.length > 0 && !isFinished) {
-                    const current = queue[0];
-                    if (!isFlipped) speak(current.word);
-                    else speak(current.example.split('(')[0]);
-                }
-            }, [queue[0], isFlipped, isFinished, speak]);
+                if (queue.length > 0 && !isFinished && !isFlipped) speak(queue[0].word);
+            }, [queue[0], isFlipped, isFinished]);
 
-            const progress = totalCount > 0 ? ((totalCount - queue.length) / totalCount) * 100 : 0;
             const currentCard = queue[0];
+            const progress = totalCount > 0 ? ((totalCount - queue.length) / totalCount) * 100 : 0;
 
-            if (isFinished) {
+            if (isFinished && totalCount > 0) {
                 return (
-                    <div className="h-full flex items-center justify-center p-6 bg-slate-50 text-center">
-                        <div className="bg-white p-10 rounded-[3rem] shadow-2xl w-full max-w-sm border border-slate-100 animate-pop">
-                            <Icon name="check-circle" size={64} className="text-green-500 mx-auto mb-4" />
-                            <h2 className="text-3xl font-black text-slate-800">複習完畢</h2>
-                            <p className="mt-2 text-slate-400 text-sm italic">數據已同步至 TestTimes 欄位</p>
-                            <button onClick={() => window.location.reload()} className="mt-8 w-full py-4 bg-indigo-600 text-white rounded-2xl font-black transition-transform active:scale-95 shadow-lg shadow-indigo-200">返回</button>
+                    <div className="h-full flex items-center justify-center p-6 bg-slate-50">
+                        <div className="bg-white p-10 rounded-[3rem] shadow-2xl w-full max-w-sm text-center animate-pop border border-slate-100">
+                            <div className="w-24 h-24 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-6">
+                                <Icon name="party-popper" size={48} className="text-green-500" />
+                            </div>
+                            <h2 className="text-3xl font-black text-slate-800">複習大功告成</h2>
+                            <p className="mt-3 text-slate-400 text-sm">今天共複習了 {totalCount} 個單詞</p>
+                            <button onClick={() => window.location.reload()} className="mt-10 w-full py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-lg shadow-indigo-100 active:scale-95 transition-all">返回首頁</button>
                         </div>
                     </div>
                 );
@@ -266,98 +318,138 @@
             return (
                 <div className="h-full flex flex-col p-4 w-full max-w-md mx-auto">
                     {/* Header */}
-                    <div className="flex justify-between items-center mb-4 px-1 flex-none">
-                        <div className="flex flex-col text-left">
-                            <h1 className="text-lg font-black text-indigo-600 flex items-center gap-1.5"><Icon name="shield-check" size={20} className="fill-current" /> SRS AUTH</h1>
-                            <span className="text-[8px] font-bold text-slate-300 uppercase tracking-widest leading-none">Syncing with TestTimes</span>
+                    <div className="flex justify-between items-center mb-6 px-1">
+                        <div>
+                            <h1 className="text-xl font-black text-slate-800 flex items-center gap-2">
+                                <Icon name="Zap" size={20} className="text-indigo-600 fill-indigo-600" /> 
+                                SRS Master
+                            </h1>
+                            <p className="text-[10px] text-slate-400 font-bold tracking-widest uppercase">AI Memory Assistant</p>
                         </div>
-                        <button onClick={syncFromLark} disabled={loading} className="px-4 py-2 bg-indigo-600 text-white rounded-full text-[10px] font-black flex items-center gap-1.5 shadow-md disabled:opacity-50 active:scale-95 transition-all">
-                            <Icon name={loading ? "loader-2" : "refresh-cw"} className={loading ? "animate-spin" : ""} size={12} />
-                            {loading ? "同步中" : "雲端載入"}
+                        <button onClick={syncFromLark} disabled={loading} className="p-3 bg-white border border-slate-200 rounded-2xl shadow-sm active:scale-90 transition-all text-indigo-600 disabled:opacity-50">
+                            <Icon name={loading ? "loader-2" : "refresh-cw"} className={loading ? "animate-spin" : ""} size={18} />
                         </button>
                     </div>
 
-                    {/* Alerts */}
-                    {missingFields.length > 0 && (
-                        <div className="mb-4 p-3 bg-rose-50 border border-rose-100 rounded-2xl text-[10px] text-rose-600 font-medium animate-pulse text-left">
-                            <p className="font-black flex items-center gap-1 mb-1"><Icon name="alert-circle" size={12}/> 警告：欄位匹配失敗</p>
-                            <p>找不到：<span className="font-mono bg-white px-1 rounded">{missingFields.join(", ")}</span></p>
-                        </div>
-                    )}
-
                     {queue.length > 0 ? (
                         <div className="flex-1 flex flex-col min-h-0">
-                            {/* Progress */}
-                            <div className="mb-4 flex-none px-1">
-                                <div className="flex justify-between text-[9px] font-black text-slate-400 mb-1.5 uppercase tracking-tighter">
-                                    <span>Progress: {totalCount - queue.length}/{totalCount}</span>
-                                    <span className="text-indigo-400">Rank: {currentCard.rank}</span>
+                            <div className="mb-6 px-1">
+                                <div className="flex justify-between text-[10px] font-black text-slate-400 mb-2 uppercase">
+                                    <span>Progress: {totalCount - queue.length} / {totalCount}</span>
+                                    <span className="text-indigo-500 font-bold">Queue: {queue.length}</span>
                                 </div>
-                                <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden shadow-inner">
-                                    <div className="bg-indigo-500 h-full transition-all duration-700" style={{ width: `${progress}%` }}></div>
+                                <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden shadow-inner">
+                                    <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-full transition-all duration-700 ease-out" style={{ width: `${progress}%` }}></div>
                                 </div>
                             </div>
 
-                            {/* Card Container */}
-                            <div className="flex-1 relative perspective-1000 mb-4" onClick={() => setIsFlipped(!isFlipped)}>
-                                <div className={`relative w-full h-full transition-all duration-500 transform-style-3d shadow-xl rounded-[2.5rem] ${isFlipped ? 'rotate-y-180' : ''}`}>
+                            <div className="flex-1 relative perspective-1000 mb-6" onClick={() => setIsFlipped(!isFlipped)}>
+                                <div className={`relative w-full h-full transform-style-3d shadow-2xl rounded-[3rem] cursor-pointer ${isFlipped ? 'rotate-y-180' : ''}`}>
                                     
-                                    {/* Card Front */}
-                                    <div className="absolute w-full h-full backface-hidden bg-white rounded-[2.5rem] flex flex-col items-center justify-center p-6 border border-slate-100">
-                                        {/* TestTimes Badge */}
-                                        <div className="absolute top-6 left-6 flex items-center gap-1 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-100">
-                                            <Icon name="bar-chart-3" size={12} className="text-indigo-400" />
-                                            <span className="text-[10px] font-black text-slate-500 uppercase tracking-tighter">TestTimes: {currentCard.testTimes}</span>
+                                    {/* Front Side */}
+                                    <div className="absolute w-full h-full backface-hidden bg-white rounded-[3rem] flex flex-col items-center justify-center p-8 border border-white">
+                                        <div className="absolute top-8 left-8 flex items-center gap-2 text-slate-400">
+                                            <Icon name="award" size={14} className="text-indigo-500" />
+                                            <span className="text-[10px] font-black uppercase tracking-tighter">Level {Math.floor(currentCard.rank)}</span>
                                         </div>
-                                        
-                                        <h2 className="text-5xl font-black text-slate-800 text-center break-words leading-tight">{currentCard.word}</h2>
-                                        
-                                        <div className="mt-10">
-                                            <button onClick={(e) => { e.stopPropagation(); speak(currentCard.word); }} className="p-5 rounded-full bg-indigo-50 text-indigo-500 active:scale-90 transition-transform shadow-sm border border-indigo-100">
-                                                <Icon name="volume-2" size={36}/>
-                                            </button>
+                                        <div className="absolute bottom-10 left-8 flex items-center gap-2 text-slate-400">
+                                            <Icon name="history" size={14} className="text-indigo-400" />
+                                            <span className="text-[10px] font-black uppercase tracking-tighter">Times: {currentCard.testTimes || 0}</span>
                                         </div>
-                                        <p className="absolute bottom-8 text-[9px] font-black text-slate-200 uppercase tracking-[0.3em] animate-pulse">TAP TO FLIP</p>
+                                        <h2 className="text-5xl font-black text-slate-800 text-center leading-tight mb-8">{currentCard.word}</h2>
+                                        <button onClick={(e) => { e.stopPropagation(); speak(currentCard.word); }} className="w-16 h-16 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center active:scale-90 transition-all border border-indigo-100"><Icon name="volume-2" size={28}/></button>
+                                        <div className="absolute bottom-10 right-8 text-[9px] font-bold text-slate-300 uppercase tracking-widest animate-pulse">Tap to Reveal</div>
                                     </div>
 
-                                    {/* Card Back */}
-                                    <div className="absolute w-full h-full backface-hidden bg-white rounded-[2.5rem] rotate-y-180 border border-slate-100 overflow-hidden text-left shadow-2xl">
-                                        <div className="card-back-grid">
-                                            <div className="bg-slate-100 overflow-hidden relative">
-                                                <img src={`https://loremflickr.com/600/400/${encodeURIComponent(currentCard.word)}`} className="w-full h-full object-cover grayscale-[0.2] contrast-125" alt="Visual"/>
-                                                <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-md px-3 py-1 rounded-full text-[9px] text-slate-800 font-black shadow-sm">
-                                                    #{currentCard.testTimes} Times Tested
+                                    {/* Back Side */}
+                                    <div className="absolute w-full h-full backface-hidden bg-white rounded-[3rem] rotate-y-180 border border-white overflow-hidden shadow-inner">
+                                        <div className="card-back-container">
+                                            {/* 頂部圖片固定高度 */}
+                                            <div className="relative h-1/4 flex-none overflow-hidden">
+                                                <img 
+                                                    src={`https://loremflickr.com/600/400/${currentCard.word}?lock=${currentCard.record_id.length}`} 
+                                                    className="w-full h-full object-cover" 
+                                                    alt="Memory Anchor"
+                                                />
+                                                <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent"></div>
+                                            </div>
+                                            
+                                            {/* 中間滾動內容區 */}
+                                            <div className="content-scroll-area custom-scroll">
+                                                <div className="px-8 py-4 flex flex-col justify-center bg-white border-b border-slate-50">
+                                                    <div className="flex items-center gap-2 mb-1">
+                                                        <span className="px-2 py-0.5 bg-indigo-100 text-indigo-600 text-[9px] font-black rounded-md uppercase tracking-tighter">
+                                                            {currentCard.pos || 'Unknown'}
+                                                        </span>
+                                                    </div>
+                                                    <h3 className="text-2xl font-black text-slate-800">{currentCard.translation}</h3>
+                                                </div>
+
+                                                <div className="px-8 flex items-center border-b border-slate-50 bg-slate-50/30 py-3">
+                                                    <span className="text-[9px] font-black text-slate-400 w-20 flex-none uppercase tracking-tighter">Inflection</span>
+                                                    <span className="text-slate-600 text-xs font-bold italic truncate">{currentCard.inflection || '---'}</span>
+                                                </div>
+                                                
+                                                <div className="px-8 flex items-center border-b border-slate-50 bg-white py-3">
+                                                    <span className="text-[9px] font-black text-slate-400 w-20 flex-none uppercase tracking-tighter">Collocation</span>
+                                                    <span className="text-indigo-600 text-xs font-black truncate">{currentCard.collocation || '---'}</span>
+                                                </div>
+
+                                                <div className="px-8 py-5 bg-white relative">
+                                                    <p className="text-slate-500 text-[11px] leading-relaxed font-medium italic pr-8">
+                                                        "{currentCard.example || 'No example sentence available.'}"
+                                                    </p>
+                                                    <button onClick={(e) => {e.stopPropagation(); speak(currentCard.example);}} className="absolute top-4 right-6 text-indigo-400 hover:text-indigo-600 p-2"><Icon name="volume-2" size={16}/></button>
+                                                </div>
+
+                                                {/* ✨ AI 延伸區域 ✨ */}
+                                                <div className="px-6 bg-slate-50/80 border-t border-slate-100 mt-auto" onClick={e => e.stopPropagation()}>
+                                                    <button 
+                                                        onClick={handleAiEnhance}
+                                                        className="w-full py-4 flex items-center justify-center gap-2 text-indigo-600 group active:scale-95 transition-all"
+                                                    >
+                                                        <Icon name="sparkles" size={14} className={aiLoading ? "animate-pulse" : ""} />
+                                                        <span className="text-[10px] font-black uppercase tracking-widest">
+                                                            {aiLoading ? "Gemini Thinking..." : (aiTip ? "AI Memory Advice" : "Generate AI Mnemonic")}
+                                                        </span>
+                                                        <Icon name={showAi ? "chevron-up" : "chevron-down"} size={14} className="ml-1 opacity-40" />
+                                                    </button>
+                                                    
+                                                    <div className={`ai-expand ${showAi ? 'show' : ''}`}>
+                                                        <div className="bg-white rounded-2xl p-4 shadow-sm border border-indigo-50 mx-2">
+                                                            {aiLoading ? (
+                                                                <div className="flex flex-col items-center py-4 gap-2">
+                                                                    <div className="flex gap-1">
+                                                                        <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce"></div>
+                                                                        <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.2s]"></div>
+                                                                        <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.4s]"></div>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <p className="text-[11px] text-slate-700 leading-relaxed font-medium">
+                                                                    {aiTip}
+                                                                </p>
+                                                            )}
+                                                        </div>
+                                                    </div>
                                                 </div>
                                             </div>
-                                            
-                                            <div className="px-6 flex flex-col justify-center border-b border-slate-50 bg-white">
-                                                <span className="px-2 py-0.5 bg-indigo-600 text-white text-[9px] font-black rounded-lg mb-1 inline-block w-fit uppercase">{currentCard.pos}</span>
-                                                <h3 className="text-2xl font-black text-slate-800 leading-tight">{currentCard.translation}</h3>
-                                            </div>
 
-                                            <div className="px-6 flex items-center border-b border-slate-50 bg-white text-[11px]">
-                                                <span className="text-[9px] font-black text-slate-300 w-16 flex-none uppercase tracking-tighter">Inflection</span>
-                                                <span className="text-slate-600 italic truncate font-bold">{currentCard.inflection || '-'}</span>
-                                            </div>
-                                            
-                                            <div className="px-6 flex items-center border-b border-slate-50 bg-white text-indigo-600 text-[11px]">
-                                                <span className="text-[9px] font-black text-slate-300 w-16 flex-none uppercase tracking-tighter">Collocation</span>
-                                                <span className="truncate font-black">{currentCard.collocation || '-'}</span>
-                                            </div>
-
-                                            <div className="px-6 flex items-center bg-indigo-50/20 relative overflow-hidden">
-                                                <p className="italic text-slate-500 text-[10px] leading-relaxed line-clamp-2 pr-10 font-bold">"{currentCard.example}"</p>
-                                                <button onClick={(e) => {e.stopPropagation(); speak(currentCard.example.split('(')[0]);}} className="absolute right-5 text-indigo-400 active:scale-90 transition-all p-2 bg-white rounded-full shadow-sm">
-                                                    <Icon name="volume-2" size={16}/>
-                                                </button>
-                                            </div>
-
-                                            {/* SRS Buttons */}
-                                            <div className="p-3 bg-white border-t border-slate-100 grid grid-cols-4 gap-2 flex-none" onClick={e => e.stopPropagation()}>
-                                                {['Again', 'Hard', 'Good', 'Easy'].map((l, i) => (
-                                                    <button key={l} onClick={() => handleSRS(l.toLowerCase())} className="py-4 bg-slate-50 border border-slate-100 rounded-2xl flex flex-col items-center active:bg-indigo-600 active:text-white transition-all group active:shadow-indigo-200 active:shadow-lg">
-                                                        <span className="text-[9px] font-black uppercase text-indigo-500 group-active:text-white leading-none tracking-tighter">{l}</span>
-                                                        <span className="text-[11px] font-black text-slate-300 mt-1.5 group-active:text-white/60 leading-none">{i+1}</span>
+                                            {/* 底部按鈕固定 */}
+                                            <div className="p-4 bg-white border-t border-slate-100 grid grid-cols-4 gap-2 flex-none" onClick={e => e.stopPropagation()}>
+                                                {[
+                                                    { id: 'again', label: 'Again', color: 'text-rose-500' },
+                                                    { id: 'hard', label: 'Hard', color: 'text-orange-500' },
+                                                    { id: 'good', label: 'Good', color: 'text-emerald-500' },
+                                                    { id: 'easy', label: 'Easy', color: 'text-blue-500' }
+                                                ].map((btn, idx) => (
+                                                    <button 
+                                                        key={btn.id} 
+                                                        onClick={() => handleSRS(btn.id)} 
+                                                        className={`py-4 rounded-2xl flex flex-col items-center transition-all border border-slate-200 bg-slate-50 active:bg-indigo-600 active:text-white group ${lastAction === btn.id ? 'srs-btn-active' : ''}`}
+                                                    >
+                                                        <span className={`text-[9px] font-black uppercase mb-1 tracking-tighter ${btn.color} group-active:text-white`}>{btn.label}</span>
+                                                        <span className="text-[10px] font-black text-slate-300 group-active:text-white/50">{idx + 1}</span>
                                                     </button>
                                                 ))}
                                             </div>
@@ -367,21 +459,28 @@
                             </div>
                         </div>
                     ) : (
-                        <div className="flex-1 flex items-center justify-center">
-                             <div className="bg-white p-10 rounded-[3rem] border-2 border-dashed border-slate-200 text-center w-full animate-pop">
-                                <div className="w-20 h-20 bg-indigo-50 rounded-[2rem] flex items-center justify-center mx-auto mb-8 shadow-inner shadow-indigo-100/50">
+                        <div className="flex-1 flex flex-col items-center justify-center p-6">
+                             <div className="bg-white p-10 rounded-[3rem] border border-slate-100 text-center w-full shadow-xl animate-pop">
+                                <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-inner shadow-indigo-100/50">
                                     <Icon name="database" size={40} className="text-indigo-500" />
                                 </div>
-                                <h3 className="text-xl font-black text-slate-800 mb-2 tracking-tight">數據鏈結中</h3>
-                                <p className="text-slate-400 text-[10px] mb-10 font-bold italic tracking-tighter text-center uppercase">Target Fields: Word, Translation, TestTimes, Rank, Next, Last</p>
-                                <button onClick={syncFromLark} className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-xl shadow-indigo-100 transition-transform active:scale-95 tracking-widest text-sm">點擊同步資料</button>
+                                <h3 className="text-2xl font-black text-slate-800 mb-3 tracking-tight">準備就緒</h3>
+                                <p className="text-slate-400 text-xs mb-10 font-medium px-4 leading-relaxed text-center">
+                                    系統已準備好同步數據，並啟動 <span className="text-indigo-600 font-bold tracking-widest uppercase">✨ Gemini 2.5 Flash</span> 記憶增強功能。
+                                </p>
+                                <button onClick={syncFromLark} className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-xl shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-3">
+                                    <Icon name="cloud-download" size={20} />
+                                    同步數據並開始
+                                </button>
                             </div>
                         </div>
                     )}
                 </div>
             );
         };
-        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
     </script>
 </body>
 </html>
