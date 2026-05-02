@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SRS 單字學習卡 - 離線完整版</title>
+    <!-- 引入必要的外部資源 (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        .perspective-1000 { perspective: 1000px; }
+        .transform-style-3d { transform-style: preserve-3d; }
+        .backface-hidden { backface-visibility: hidden; }
+        .rotate-y-180 { transform: rotateY(180deg); }
+        
+        /* 全螢幕佈局鎖定 */
+        body, html { 
+            height: 100vh; 
+            height: -webkit-fill-available;
+            margin: 0; 
+            padding: 0;
+            overflow: hidden; 
+            background-color: #f8fafc;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        #root {
+            height: 100%;
+        }
+
+        /* 3:2:1:1:1 比例網格系統 */
+        .card-grid-layout {
+            display: grid;
+            grid-template-rows: 3fr 2fr 1fr 1fr 1fr auto;
+            height: 100%;
+        }
+
+        /* 動畫效果 */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        .animate-pop {
+            animation: fadeIn 0.2s ease-out forwards;
+        }
+
+        /* 隱藏捲軸 */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback, useRef } = React;
+
+        const Icon = ({ name, size = 24, className = "" }) => {
+            const containerRef = useRef(null);
+            useEffect(() => {
+                if (window.lucide && containerRef.current) {
+                    containerRef.current.innerHTML = `<i data-lucide="${name}" style="width: ${size}px; height: ${size}px" class="${className}"></i>`;
+                    window.lucide.createIcons({
+                        attrs: { class: className },
+                        nameAttr: 'data-lucide'
+                    });
+                }
+                return () => { if (containerRef.current) containerRef.current.innerHTML = ''; };
+            }, [name, size, className]);
+            return <span ref={containerRef} className="inline-flex items-center justify-center" />;
+        };
+
+        const App = () => {
+            const [originalCards, setOriginalCards] = useState([]);
+            const [queue, setQueue] = useState([]);
+            const [isFlipped, setIsFlipped] = useState(false);
+            const [stats, setStats] = useState({ again: 0, hard: 0, good: 0, easy: 0 });
+            const [isFinished, setIsFinished] = useState(false);
+            const [totalCount, setTotalCount] = useState(0);
+            const [showInfo, setShowInfo] = useState(false);
+
+            const getImageUrl = (word) => `https://loremflickr.com/600/400/${encodeURIComponent(word)}`;
+
+            const speak = useCallback((text, lang = 'en-US') => {
+                if (!text) return;
+                window.speechSynthesis.cancel();
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = lang;
+                window.speechSynthesis.speak(utterance);
+            }, []);
+
+            const handleFileUpload = (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const text = e.target.result;
+                    const rows = text.split('\n').filter(row => row.trim() !== '');
+                    const parsedCards = rows.slice(1).map((row, index) => {
+                        const parts = row.split(',').map(part => part.trim().replace(/^"|"$/g, ''));
+                        return {
+                            id: `card-${index}-${Date.now()}`,
+                            word: parts[0] || '',
+                            pos: parts[1] || '',
+                            translation: parts[2] || '',
+                            inflection: parts[3] || '',
+                            collocation: parts[4] || '',
+                            example: parts[5] || ''
+                        };
+                    });
+                    if (parsedCards.length > 0) startSession(parsedCards);
+                };
+                reader.readAsText(file);
+            };
+
+            const startSession = (cards) => {
+                setOriginalCards(cards);
+                setQueue([...cards]);
+                setTotalCount(cards.length);
+                setStats({ again: 0, hard: 0, good: 0, easy: 0 });
+                setIsFinished(false);
+                setIsFlipped(false);
+            };
+
+            const handleSRS = useCallback((type) => {
+                setStats(prev => ({ ...prev, [type]: prev[type] + 1 }));
+                const [head, ...tail] = queue;
+                let newQueue = [...tail];
+                
+                if (type === 'again') {
+                    newQueue.splice(1, 0, head);
+                } else if (type === 'hard') {
+                    newQueue.splice(Math.floor(newQueue.length / 2), 0, head);
+                } else if (type === 'good') {
+                    newQueue.push(head);
+                }
+                
+                if (newQueue.length === 0) {
+                    setIsFinished(true);
+                } else {
+                    setQueue(newQueue);
+                    setIsFlipped(false);
+                }
+            }, [queue]);
+
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    if (isFinished || queue.length === 0 || showInfo) return;
+                    if (e.code === 'Space') {
+                        e.preventDefault();
+                        setIsFlipped(prev => !prev);
+                    }
+                    if (isFlipped) {
+                        if (e.key === '1') handleSRS('again');
+                        if (e.key === '2') handleSRS('hard');
+                        if (e.key === '3') handleSRS('good');
+                        if (e.key === '4') handleSRS('easy');
+                    }
+                    if (e.key === 'Enter') {
+                        if (!isFlipped) speak(queue[0]?.word);
+                        else speak(queue[0]?.example.split('(')[0]);
+                    }
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [isFlipped, isFinished, queue, handleSRS, speak, showInfo]);
+
+            useEffect(() => {
+                if (queue[0] && !isFinished) {
+                    if (!isFlipped) speak(queue[0].word);
+                    else speak(queue[0].example.split('(')[0]);
+                }
+            }, [queue, isFlipped, isFinished, speak]);
+
+            const progress = totalCount > 0 ? ((totalCount - queue.length) / totalCount) * 100 : 0;
+            const currentCard = queue[0];
+
+            if (isFinished) {
+                return (
+                    <div className="h-full flex items-center justify-center p-6 bg-slate-50">
+                        <div className="bg-white p-10 rounded-[2.5rem] shadow-2xl max-w-sm w-full text-center animate-pop border border-slate-100">
+                            <Icon name="trophy" size={64} className="text-yellow-500 mx-auto mb-6" />
+                            <h2 className="text-3xl font-black mb-2 text-slate-800">完成學習！</h2>
+                            <p className="text-slate-400 text-sm mb-8 font-medium">今天的目標已達成</p>
+                            <div className="grid grid-cols-2 gap-3 mb-8">
+                                <div className="bg-red-50 py-3 rounded-2xl text-red-600 border border-red-100">
+                                    <div className="text-[10px] font-bold uppercase tracking-wider">Again</div>
+                                    <div className="text-xl font-black">{stats.again}</div>
+                                </div>
+                                <div className="bg-orange-50 py-3 rounded-2xl text-orange-600 border border-orange-100">
+                                    <div className="text-[10px] font-bold uppercase tracking-wider">Hard</div>
+                                    <div className="text-xl font-black">{stats.hard}</div>
+                                </div>
+                                <div className="bg-green-50 py-3 rounded-2xl text-green-600 border border-green-100">
+                                    <div className="text-[10px] font-bold uppercase tracking-wider">Good</div>
+                                    <div className="text-xl font-black">{stats.good}</div>
+                                </div>
+                                <div className="bg-blue-50 py-3 rounded-2xl text-blue-600 border border-blue-100">
+                                    <div className="text-[10px] font-bold uppercase tracking-wider">Easy</div>
+                                    <div className="text-xl font-black">{stats.easy}</div>
+                                </div>
+                            </div>
+                            <button onClick={() => startSession(originalCards)} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-lg shadow-indigo-200 flex items-center justify-center gap-2 hover:bg-indigo-700 active:scale-95 transition-all">
+                                <Icon name="refresh-cw" size={20} /> 重新挑戰
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="h-full flex flex-col p-4 max-h-screen overflow-hidden">
+                    <div className="flex-none w-full max-w-md mx-auto flex justify-between items-center mb-2 px-1">
+                        <div className="flex items-center gap-2">
+                            <div className="bg-indigo-600 p-1.5 rounded-lg">
+                                <Icon name="brain-circuit" size={18} className="text-white" />
+                            </div>
+                            <h1 className="text-lg font-black text-slate-800 tracking-tight">SRS Flashcards</h1>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={() => setShowInfo(true)} className="p-2 rounded-full bg-white border border-slate-200 text-slate-400 hover:text-indigo-600 transition-all active:scale-90">
+                                <Icon name="help-circle" size={18} />
+                            </button>
+                            <label className="text-[10px] bg-indigo-600 text-white border border-indigo-500 px-4 py-2 rounded-full cursor-pointer font-black shadow-md shadow-indigo-100 flex items-center gap-2 hover:bg-indigo-700 transition-all active:scale-90">
+                                <Icon name="plus-circle" size={12} /> 匯入單字
+                                <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+                            </label>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 flex flex-col justify-center items-center w-full min-h-0">
+                        {queue.length > 0 ? (
+                            <div className="w-full max-w-md h-full flex flex-col min-h-0 animate-pop">
+                                <div className="flex-none mb-3 px-2">
+                                    <div className="flex justify-between text-[10px] text-slate-400 mb-1.5 font-black tracking-widest">
+                                        <span>STATUS: {totalCount - queue.length} / {totalCount}</span>
+                                        <div className="flex gap-3">
+                                            <span className="text-red-400">AGAIN: {stats.again}</span>
+                                            <span className="text-green-400">GOOD: {stats.good}</span>
+                                        </div>
+                                    </div>
+                                    <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
+                                        <div className="bg-indigo-500 h-full transition-all duration-500 ease-out" style={{ width: `${progress}%` }}></div>
+                                    </div>
+                                </div>
+
+                                <div className="flex-1 relative perspective-1000 min-h-0 mb-4" onClick={() => setIsFlipped(!isFlipped)}>
+                                    <div className={`relative w-full h-full cursor-pointer transition-transform duration-700 transform-style-3d shadow-2xl rounded-[2.5rem] ${isFlipped ? 'rotate-y-180' : ''}`}>
+                                        
+                                        <div className="absolute w-full h-full backface-hidden bg-white rounded-[2.5rem] flex flex-col items-center justify-center p-8 border border-slate-100">
+                                            <div className="flex flex-col items-center text-center">
+                                                <h2 className="text-6xl font-black text-slate-800 mb-8 tracking-tight break-all">{currentCard.word}</h2>
+                                                <button onClick={(e) => { e.stopPropagation(); speak(currentCard.word); }} className="p-5 rounded-full bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-all active:scale-90">
+                                                    <Icon name="volume-2" size={36} />
+                                                </button>
+                                            </div>
+                                            <div className="absolute bottom-10 flex flex-col items-center gap-2">
+                                                <div className="w-10 h-1 bg-slate-100 rounded-full"></div>
+                                                <p className="text-[10px] text-slate-300 uppercase tracking-[0.3em] font-black">Tap to Flip</p>
+                                            </div>
+                                        </div>
+
+                                        <div className="absolute w-full h-full backface-hidden bg-white rounded-[2.5rem] rotate-y-180 flex flex-col border border-slate-100 overflow-hidden shadow-inner">
+                                            <div className="card-grid-layout h-full">
+                                                <div className="relative overflow-hidden bg-slate-50 border-b border-slate-100">
+                                                    <img src={getImageUrl(currentCard.word)} alt={currentCard.word} className="w-full h-full object-cover transition-transform duration-700 hover:scale-105" />
+                                                    <div className="absolute top-4 left-4">
+                                                        <span className="bg-black/20 backdrop-blur-md text-white text-[9px] font-black px-2 py-1 rounded-md uppercase tracking-wider">Visual Context</span>
+                                                    </div>
+                                                </div>
+
+                                                <div className="flex flex-col justify-center px-8 py-4 bg-white overflow-hidden">
+                                                    <div className="flex items-center gap-3 mb-1">
+                                                        <span className="bg-indigo-50 text-indigo-600 font-black text-[10px] px-2 py-0.5 rounded uppercase">{currentCard.pos}</span>
+                                                    </div>
+                                                    <h3 className="text-3xl font-black text-slate-800 tracking-tight leading-tight truncate">{currentCard.translation}</h3>
+                                                </div>
+
+                                                <div className="flex items-center px-8 py-1 bg-slate-50/50 overflow-hidden">
+                                                    <p className="text-xs text-slate-600 truncate">
+                                                        <span className="text-slate-300 font-black mr-4 text-[9px] uppercase tracking-widest">Inflections</span>
+                                                        <span className="font-medium">{currentCard.inflection || '-'}</span>
+                                                    </p>
+                                                </div>
+
+                                                <div className="flex items-center px-8 py-1 bg-white overflow-hidden">
+                                                    <p className="text-xs text-slate-700 truncate">
+                                                        <span className="text-slate-300 font-black mr-4 text-[9px] uppercase tracking-widest">Collocation</span>
+                                                        <span className="font-bold">{currentCard.collocation || '-'}</span>
+                                                    </p>
+                                                </div>
+
+                                                <div className="flex items-center px-8 py-2 bg-indigo-50/20 relative group overflow-hidden">
+                                                    <p className="text-[11px] text-slate-600 italic leading-snug line-clamp-2 pr-8 font-medium">
+                                                        "{currentCard.example}"
+                                                    </p>
+                                                    <button onClick={(e) => { e.stopPropagation(); speak(currentCard.example.split('(')[0]); }} className="absolute right-6 text-indigo-400 hover:text-indigo-600 transition-all">
+                                                        <Icon name="play-circle" size={18} />
+                                                    </button>
+                                                </div>
+
+                                                <div className="px-6 py-4 bg-white" onClick={(e) => e.stopPropagation()}>
+                                                    <div className="grid grid-cols-4 gap-3">
+                                                        {[
+                                                            { label: 'Again', key: '1', color: 'red', type: 'again' },
+                                                            { label: 'Hard', key: '2', color: 'orange', type: 'hard' },
+                                                            { label: 'Good', key: '3', color: 'green', type: 'good' },
+                                                            { label: 'Easy', key: '4', color: 'blue', type: 'easy' }
+                                                        ].map(btn => (
+                                                            <button 
+                                                                key={btn.type}
+                                                                onClick={() => handleSRS(btn.type)} 
+                                                                className={`py-2 rounded-2xl bg-${btn.color}-50 text-${btn.color}-600 border border-${btn.color}-100 flex flex-col items-center hover:bg-${btn.color}-100 active:scale-90 transition-all group shadow-sm`}
+                                                            >
+                                                                <span className="font-black text-[10px] uppercase tracking-wider">{btn.label}</span>
+                                                                <span className="text-[10px] font-black bg-white px-2.5 py-0.5 rounded-lg mt-1 shadow-sm border border-slate-100 group-hover:border-transparent transition-all">{btn.key}</span>
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="flex flex-col items-center justify-center p-12 bg-white rounded-[3rem] border-4 border-dashed border-slate-100 max-w-sm w-full text-center shadow-sm">
+                                <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mb-6">
+                                    <Icon name="file-spreadsheet" size={40} className="text-slate-200" />
+                                </div>
+                                <h3 className="text-xl font-black text-slate-800 mb-2">準備好學習了嗎？</h3>
+                                <p className="text-slate-400 text-sm leading-relaxed mb-8 px-4">請匯入一個包含單字資訊的 CSV 檔案。格式需包含：單詞、詞性、翻譯、變化、搭配、例句。</p>
+                                <label className="py-4 px-8 bg-indigo-600 text-white rounded-2xl font-black shadow-lg shadow-indigo-100 cursor-pointer hover:bg-indigo-700 transition-all active:scale-95">
+                                    選擇 CSV 檔案
+                                    <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+                                </label>
+                            </div>
+                        )}
+                    </div>
+
+                    {showInfo && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in duration-300">
+                            <div className="bg-white w-full max-w-xs rounded-[2.5rem] shadow-2xl overflow-hidden border border-white/20">
+                                <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+                                    <h3 className="font-black text-slate-800 flex items-center gap-2"><Icon name="help-circle" size={20} className="text-indigo-600" /> 使用指南</h3>
+                                    <button onClick={() => setShowInfo(false)} className="text-slate-300 hover:text-slate-600 transition-all"><Icon name="x" size={20} /></button>
+                                </div>
+                                <div className="p-6 space-y-6">
+                                    <section>
+                                        <h4 className="text-[10px] font-black text-slate-300 uppercase tracking-[0.2em] mb-3">鍵盤操作</h4>
+                                        <div className="space-y-3">
+                                            <div className="flex justify-between items-center text-sm font-bold text-slate-600">
+                                                <span>翻轉卡片</span>
+                                                <kbd className="bg-slate-100 px-3 py-1 rounded-lg border-b-2 border-slate-200 text-[10px]">Space</kbd>
+                                            </div>
+                                            <div className="flex justify-between items-center text-sm font-bold text-slate-600">
+                                                <span>單字/例句發音</span>
+                                                <kbd className="bg-slate-100 px-3 py-1 rounded-lg border-b-2 border-slate-200 text-[10px]">Enter</kbd>
+                                            </div>
+                                            <div className="flex justify-between items-center text-sm font-bold text-slate-600">
+                                                <span>選擇熟練度</span>
+                                                <kbd className="bg-slate-100 px-3 py-1 rounded-lg border-b-2 border-slate-200 text-[10px]">1 - 4</kbd>
+                                            </div>
+                                        </div>
+                                    </section>
+                                    <section className="bg-indigo-50/50 p-4 rounded-2xl">
+                                        <h4 className="text-[10px] font-black text-indigo-400 uppercase tracking-[0.2em] mb-2">佈局說明</h4>
+                                        <p className="text-[11px] text-indigo-900/60 leading-relaxed font-medium">採用 3:2:1:1:1 單頁佈局設計，在任何裝置上均無需捲動，助您專注於高效記憶。</p>
+                                    </section>
+                                </div>
+                                <button onClick={() => setShowInfo(false)} className="w-full p-5 bg-indigo-600 text-white font-black text-xs uppercase tracking-widest hover:bg-indigo-700 transition-all">開始練習</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
