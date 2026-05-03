@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>SRS 記憶助手 - AI 增強版</title>
+    <title>SRS 記憶助手</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -13,285 +13,305 @@
     
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=Noto+Sans+TC:wght@400;700;900&display=swap');
-        
-        :root {
-            --primary: #4f46e5;
-            --primary-dark: #4338ca;
-        }
-
+        :root { --primary: #4f46e5; --primary-dark: #4338ca; }
         body, html { 
-            height: 100%; 
-            margin: 0; 
-            background-color: #f1f5f9; 
-            overflow: hidden; 
-            user-select: none;
-            position: fixed;
-            width: 100%;
+            height: 100%; margin: 0; background-color: #f1f5f9; 
+            overflow: hidden; user-select: none; position: fixed; width: 100%;
             font-family: 'Inter', 'Noto Sans TC', sans-serif;
         }
-        
         #root { height: 100%; display: flex; flex-direction: column; }
-        
         .perspective-1000 { perspective: 1200px; }
         .transform-style-3d { transform-style: preserve-3d; transition: transform 0.6s cubic-bezier(0.34, 1.56, 0.64, 1); }
         .backface-hidden { backface-visibility: hidden; }
         .rotate-y-180 { transform: rotateY(180deg); }
-        
-        /* 修正佈局：讓中間內容區可滾動 */
-        .card-back-container {
-            display: flex;
-            flex-direction: column;
-            height: 100%;
-            width: 100%;
-        }
-
-        .content-scroll-area {
-            flex: 1;
-            overflow-y: auto;
-            display: flex;
-            flex-direction: column;
-        }
-
+        .card-back-container { display: flex; flex-direction: column; height: 100%; width: 100%; }
+        .content-scroll-area { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
         .animate-pop { animation: pop 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
         @keyframes pop { 
             from { opacity: 0; transform: scale(0.95) translateY(10px); } 
             to { opacity: 1; transform: scale(1) translateY(0); } 
         }
-
         .srs-btn-active { transform: scale(0.95); background-color: var(--primary); color: white !important; }
-        
         .custom-scroll::-webkit-scrollbar { width: 4px; }
         .custom-scroll::-webkit-scrollbar-track { background: transparent; }
         .custom-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
-
-        /* AI 展開動畫優化 */
-        .ai-expand {
-            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            max-height: 0;
-            opacity: 0;
-            overflow: hidden;
-        }
-        .ai-expand.show {
-            max-height: 500px; /* 增加最大高度確保內容不被截斷 */
-            opacity: 1;
-            padding-bottom: 16px;
-        }
+        .status-scroll::-webkit-scrollbar { width: 3px; }
+        .status-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useCallback, useRef, useMemo } = React;
+        const { useState, useEffect, useCallback, useRef } = React;
 
-        const LARK_CONFIG = {
-            APP_ID: 'cli_a97f5cbca1389e15'.trim(),
-            APP_SECRET: 'dZwAHFAwFdxMBN3ax84QGcct6rB1QGeJ'.trim(),
-            APP_TOKEN: 'Fwr9bVucfaWRNQsmN0wjEfXqpSR'.trim(), 
-            TABLE_ID: 'tblVMg0ADZPVV3WB'.trim()              
+        // ✅ Replace with your deployed Worker URL
+        const API_BASE = "https://srs-memory-worker.heyangg19.workers.dev";
+
+        // ─── localStorage cache ───────────────────────────────────────────────
+        const CACHE_KEY = 'srs_cache';
+        const todayKey = () => new Date().toISOString().slice(0, 10);
+        const saveCache = (cards) => {
+            try { localStorage.setItem(CACHE_KEY, JSON.stringify({ date: todayKey(), cards })); }
+            catch (e) { console.warn('Cache write failed:', e); }
         };
+        const loadCache = () => {
+            try {
+                const raw = localStorage.getItem(CACHE_KEY);
+                if (!raw) return null;
+                const { date, cards } = JSON.parse(raw);
+                if (date !== todayKey()) return null;
+                return cards;
+            } catch (e) { return null; }
+        };
+        const loadStaleCache = () => {
+            try { const raw = localStorage.getItem(CACHE_KEY); return raw ? JSON.parse(raw).cards : null; }
+            catch { return null; }
+        };
+        // ─────────────────────────────────────────────────────────────────────
 
-        const PROXY = "https://cors-anywhere.herokuapp.com/";
-        const GEMINI_API_KEY = ""; 
-
-        const callGemini = async (prompt, systemPrompt = "") => {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
-            const payload = {
-                contents: [{ parts: [{ text: prompt }] }],
-                systemInstruction: { parts: [{ text: systemPrompt }] }
-            };
-            const fetchWithRetry = async (retries = 5, delay = 1000) => {
-                try {
-                    const res = await fetch(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-                    if (!res.ok) throw new Error(`API Error: ${res.status}`);
-                    const data = await res.json();
-                    return data.candidates?.[0]?.content?.parts?.[0]?.text || "無法生成內容";
-                } catch (err) {
-                    if (retries > 0) {
-                        await new Promise(r => setTimeout(r, delay));
-                        return fetchWithRetry(retries - 1, delay * 2);
-                    }
-                    throw err;
-                }
-            };
-            return fetchWithRetry();
+        const apiFetch = async (path, options = {}, retries = 3, delay = 800) => {
+            try {
+                const res = await fetch(API_BASE + path, {
+                    ...options,
+                    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+                });
+                if (!res.ok) { const t = await res.text(); throw new Error(`Worker ${res.status}: ${t}`); }
+                return res.json();
+            } catch (err) {
+                if (retries > 0) { await new Promise(r => setTimeout(r, delay)); return apiFetch(path, options, retries - 1, delay * 2); }
+                throw err;
+            }
         };
 
         const Icon = ({ name, size = 24, className = "" }) => {
-            const containerRef = useRef(null);
+            const ref = useRef(null);
             useEffect(() => {
-                if (window.lucide && containerRef.current) {
-                    containerRef.current.innerHTML = `<i data-lucide="${name}" style="width: ${size}px; height: ${size}px" class="${className}"></i>`;
+                if (window.lucide && ref.current) {
+                    ref.current.innerHTML = `<i data-lucide="${name}" style="width:${size}px;height:${size}px" class="${className}"></i>`;
                     window.lucide.createIcons();
                 }
             }, [name, size, className]);
-            return <span ref={containerRef} className="inline-flex items-center justify-center" />;
+            return <span ref={ref} className="inline-flex items-center justify-center" />;
+        };
+
+        // ─── rank → colour helper ─────────────────────────────────────────────
+        const rankColor = (rank) => {
+            if (rank >= 8) return 'text-emerald-500 bg-emerald-50';
+            if (rank >= 5) return 'text-blue-500 bg-blue-50';
+            if (rank >= 3) return 'text-amber-500 bg-amber-50';
+            return 'text-rose-500 bg-rose-50';
         };
 
         const App = () => {
-            const [queue, setQueue] = useState([]);
-            const [isFlipped, setIsFlipped] = useState(false);
+            // ── state ──────────────────────────────────────────────────────────
+            const [allCards, setAllCards]     = useState([]);   // full synced set
+            const [queue, setQueue]           = useState([]);   // today's review queue
+            const [doneCards, setDoneCards]   = useState([]);   // reviewed this session
+            const [isFlipped, setIsFlipped]   = useState(false);
             const [isFinished, setIsFinished] = useState(false);
             const [totalCount, setTotalCount] = useState(0);
-            const [loading, setLoading] = useState(false);
-            const [larkToken, setLarkToken] = useState('');
+            const [loading, setLoading]       = useState(false);
             const [lastAction, setLastAction] = useState(null);
-            
-            const [aiTip, setAiTip] = useState(null);
-            const [aiLoading, setAiLoading] = useState(false);
-            const [showAi, setShowAi] = useState(false);
+            const [showPic, setShowPic]           = useState(false);
+            const [cacheStatus, setCacheStatus] = useState('idle');
+            const [view, setView]             = useState('home'); // 'home' | 'review'
+            const [dueSnapshot, setDueSnapshot]   = useState([]); // original due list for "review again"
+
+            // ── mount: auto-load cache ─────────────────────────────────────────
+            useEffect(() => {
+                const cached = loadCache();
+                if (cached && cached.length > 0) {
+                    setAllCards(cached);
+                    buildQueue(cached, false /* don't navigate yet */);
+                    setCacheStatus('offline');
+                    if (navigator.onLine) doSync(true, cached);
+                }
+            }, []);
 
             const speak = useCallback((text) => {
                 if (!text || !window.speechSynthesis) return;
                 window.speechSynthesis.cancel();
-                const utterance = new SpeechSynthesisUtterance(text);
-                const isChinese = /[\u4e00-\u9fa5]/.test(text);
-                utterance.lang = isChinese ? 'zh-TW' : 'en-US';
-                utterance.rate = isChinese ? 1.0 : 0.85;
-                window.speechSynthesis.speak(utterance);
+                const u = new SpeechSynthesisUtterance(text);
+                const isCN = /[\u4e00-\u9fa5]/.test(text);
+                u.lang = isCN ? 'zh-TW' : 'en-US';
+                u.rate = isCN ? 1.0 : 0.85;
+                window.speechSynthesis.speak(u);
             }, []);
 
-            const fetchToken = async () => {
-                const res = await fetch(PROXY + 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ app_id: LARK_CONFIG.APP_ID, app_secret: LARK_CONFIG.APP_SECRET })
+            // ── parse Lark items ───────────────────────────────────────────────
+            const parseItems = (items) => {
+                const rawFields = Object.keys(items[0].fields);
+                const find = (opts) => rawFields.find(f => {
+                    const cf = f.replace(/[\s_]/g, '').toLowerCase();
+                    return opts.some(o => cf === o.replace(/[\s_]/g, '').toLowerCase());
                 });
-                const data = await res.json();
-                return data.tenant_access_token;
+                const fm = {
+                    word:        find(['單詞','單字','Word']),
+                    pos:         find(['詞性','POS']),
+                    translation: find(['中文翻譯','解釋','Translation','中文','含義']),
+                    inflection:  find(['詞性變化','變化','Inflection']),
+                    collocation: find(['搭配詞','搭配','Collocation']),
+                    example:     find(['例句','Sentence','Example']),
+                    rank:        find(['Rank','記憶權重','權重']),
+                    testTimes:   find(['TestTimes','測試次數','次數','times']),
+                    lastCheck:   find(['Last','LastCheck','最後複習']),
+                    nextReview:  find(['Next','NextReview','下次複習']),
+                    pic:         find(['pic','Pic','圖片','image','Image','Photo']),
+                };
+                console.log('Parsing items, pic field name:', fm.pic);
+                return items.map(item => {
+                    // Lark attachment field is an array [{file_token, url, tmp_url, ...}]
+                    // tmp_url expires in ~10min and requires auth — use file_token via our Worker proxy
+                    const picField = item.fields[fm.pic];
+                    let picUrl = null;
+                    
+                    if (picField && Array.isArray(picField) && picField.length > 0) {
+                        // Lark Bitable attachment: [{file_token, tmp_url, url, name, size, type}]
+                        const att = picField[0];
+                        // Use 'url' (direct download) instead of 'tmp_url' (batch endpoint)
+                        picUrl = att.url || att.file_token || null;
+                        console.log('📷', item.fields[fm.word], '→', picUrl ? 'has image' : 'no image');
+                    }
+                    return {
+                        record_id:   item.record_id,
+                        word:        item.fields[fm.word] || '',
+                        pos:         item.fields[fm.pos] || '',
+                        translation: item.fields[fm.translation] || '',
+                        inflection:  item.fields[fm.inflection] || '',
+                        collocation: item.fields[fm.collocation] || '',
+                        example:     item.fields[fm.example] || '',
+                        rank:        parseFloat(item.fields[fm.rank]) || 1,
+                        testTimes:   parseInt(item.fields[fm.testTimes]) || 0,
+                        nextReview:  item.fields[fm.nextReview] || null,
+                        picUrl,   // tmp_url from Lark Bitable attachment — Worker proxies it
+                        fieldNames:  fm,
+                    };
+                }).filter(c => c.word);
             };
 
-            const syncFromLark = async () => {
+            // ── build today's queue from all cards ─────────────────────────────
+            const buildQueue = (cards, navigate = true) => {
+                const today = new Date().setHours(0, 0, 0, 0);
+                const due = cards.filter(c => !c.nextReview || new Date(c.nextReview).getTime() <= today);
+                const shuffled = [...due].sort(() => Math.random() - 0.5);
+                setDueSnapshot(due); // snapshot for "review again" — unaffected by SRS updates
+                setQueue(shuffled);
+                setTotalCount(shuffled.length);
+                setDoneCards([]);
+                setIsFinished(false);
+                setIsFlipped(false);
+                if (navigate && shuffled.length > 0) setView('review');
+            };
+
+            // ── sync from Lark ─────────────────────────────────────────────────
+            const doSync = async (forceRefresh = false, existingCards = null) => {
+                if (!forceRefresh && existingCards) return; // already loaded from cache
                 setLoading(true);
                 try {
-                    const token = await fetchToken();
-                    setLarkToken(token);
-                    const url = `https://open.feishu.cn/open-apis/bitable/v1/apps/${LARK_CONFIG.APP_TOKEN}/tables/${LARK_CONFIG.TABLE_ID}/records?page_size=500`;
-                    const recordsRes = await fetch(PROXY + url, { headers: { 'Authorization': `Bearer ${token}` } });
-                    const recordsData = await recordsRes.json();
-                    const items = recordsData.data?.items || [];
-                    
-                    const rawFields = Object.keys(items[0].fields);
-                    const findField = (possibilities) => rawFields.find(f => {
-                        const cleanF = f.replace(/[\s_]/g, '').toLowerCase();
-                        return possibilities.some(p => cleanF === p.replace(/[\s_]/g, '').toLowerCase());
-                    });
-                    
-                    const fieldMap = {
-                        word: findField(['單詞', '單字', 'Word']),
-                        pos: findField(['詞性', 'POS']),
-                        translation: findField(['中文翻譯', '解釋', 'Translation', '中文', '含義']),
-                        inflection: findField(['詞性變化', '變化', 'Inflection']),
-                        collocation: findField(['搭配詞', '搭配', 'Collocation']),
-                        example: findField(['例句', 'Sentence', 'Example']),
-                        rank: findField(['Rank', '記憶權重', '權重']),
-                        testTimes: findField(['TestTimes', '測試次數', '次數', 'times']), 
-                        lastCheck: findField(['Last', 'LastCheck', '最後複習']),
-                        nextReview: findField(['Next', 'NextReview', '下次複習'])
-                    };
-
-                    const parsed = items.map(item => ({
-                        record_id: item.record_id, 
-                        word: item.fields[fieldMap.word] || '',
-                        pos: item.fields[fieldMap.pos] || '',
-                        translation: item.fields[fieldMap.translation] || '',
-                        inflection: item.fields[fieldMap.inflection] || '',
-                        collocation: item.fields[fieldMap.collocation] || '',
-                        example: item.fields[fieldMap.example] || '',
-                        rank: parseFloat(item.fields[fieldMap.rank]) || 1,
-                        testTimes: parseInt(item.fields[fieldMap.testTimes]) || 0,
-                        nextReview: item.fields[fieldMap.nextReview] || null,
-                        fieldNames: fieldMap 
-                    })).filter(c => c.word);
-
-                    const today = new Date().setHours(0,0,0,0);
-                    const filtered = parsed.filter(card => !card.nextReview || new Date(card.nextReview).getTime() <= today);
-
-                    setQueue([...filtered].sort(() => Math.random() - 0.5));
-                    setTotalCount(filtered.length);
-                    setIsFinished(false);
-                    setIsFlipped(false);
-                } catch (error) {
-                    console.error(error);
-                } finally {
-                    setLoading(false);
-                }
-            };
-
-            const handleAiEnhance = async (e) => {
-                e.stopPropagation();
-                if (aiLoading) return;
-                
-                if (aiTip) {
-                    setShowAi(!showAi);
-                    return;
-                }
-
-                setAiLoading(true);
-                setShowAi(true);
-                const current = queue[0];
-                try {
-                    const result = await callGemini(
-                        `請為單詞 "${current.word}" (${current.pos}) 提供一個趣味記憶法或口訣。要求簡潔，並包含中文意思 "${current.translation}"。`,
-                        "你是一位語言學習專家，擅長用創意聯想法幫助學生記憶單詞。回應請簡短精煉。"
-                    );
-                    setAiTip(result);
+                    const data = await apiFetch('/api/lark/records?page_size=500');
+                    const items = data.data?.items || [];
+                    if (items.length === 0) { alert('Lark 表格中沒有資料'); return; }
+                    const cards = parseItems(items);
+                    saveCache(cards);
+                    setAllCards(cards);
+                    setCacheStatus('synced');
+                    // rebuild queue silently if already in home view
+                    buildQueue(cards, false);
                 } catch (err) {
-                    setAiTip("AI 暫時休息中，請點擊重試。");
-                } finally {
-                    setAiLoading(false);
-                }
+                    console.error(err);
+                    const stale = loadStaleCache();
+                    if (stale && stale.length > 0) {
+                        setAllCards(stale);
+                        buildQueue(stale, false);
+                        setCacheStatus('stale');
+                    } else {
+                        alert(`同步失敗，且沒有本地快取。\n\n${err.message}`);
+                    }
+                } finally { setLoading(false); }
             };
 
+            // ── "add 20 more" ──────────────────────────────────────────────────
+            const addMoreWords = () => {
+                const today = new Date().setHours(0, 0, 0, 0);
+                const notDue = allCards.filter(c => c.nextReview && new Date(c.nextReview).getTime() > today);
+                // sort by closest nextReview so we pick words almost due first
+                notDue.sort((a, b) => new Date(a.nextReview) - new Date(b.nextReview));
+                const extra = notDue.slice(0, 20);
+                if (extra.length === 0) { alert('沒有更多可加入的單詞了！'); return; }
+                const newQueue = [...extra].sort(() => Math.random() - 0.5);
+                setQueue(newQueue);
+                setTotalCount(newQueue.length);
+                setDoneCards([]);
+                setIsFinished(false);
+                setIsFlipped(false);
+                setView('review');
+            };
+
+            // ── "review today again" ─── uses snapshot so SRS updates don't remove words ──
+            const reviewAgain = () => {
+                const src = dueSnapshot.length > 0 ? dueSnapshot : allCards;
+                if (src.length === 0) { alert('沒有今天的單詞可重複複習'); return; }
+                const shuffled = [...src].sort(() => Math.random() - 0.5);
+                setQueue(shuffled);
+                setTotalCount(shuffled.length);
+                setDoneCards([]);
+                setIsFinished(false);
+                setIsFlipped(false);
+                setView('review');
+            };
+
+            // ── SRS update ─────────────────────────────────────────────────────
             const updateLarkRecord = async (card, type) => {
                 if (!card.fieldNames.rank || !card.fieldNames.nextReview) return;
-                let currentToken = larkToken || await fetchToken();
                 const now = new Date();
-                let newRank = card.rank;
-                let daysToAdd = 0;
+                let newRank = card.rank, daysToAdd = 0;
                 switch(type) {
-                    case 'easy': newRank += 1.0; daysToAdd = 7; break;
-                    case 'good': newRank += 0.3; daysToAdd = 3; break;
-                    case 'hard': newRank -= 0.5; daysToAdd = 1; break;
+                    case 'easy':  newRank += 1.0; daysToAdd = 7; break;
+                    case 'good':  newRank += 0.3; daysToAdd = 3; break;
+                    case 'hard':  newRank -= 0.5; daysToAdd = 1; break;
                     case 'again': newRank -= 1.0; daysToAdd = 0; break;
                 }
                 newRank = Math.max(1, Math.min(10, Math.round(newRank * 10) / 10));
-                const nextReviewVal = Number(new Date().setHours(0,0,0,0) + (daysToAdd * 24 * 60 * 60 * 1000));
+                const nextReviewVal = Number(new Date().setHours(0,0,0,0) + daysToAdd * 86400000);
                 const fields = {
-                    [card.fieldNames.rank]: Number(newRank),
-                    [card.fieldNames.nextReview]: nextReviewVal,
-                    [card.fieldNames.testTimes]: Number((card.testTimes || 0) + 1),
-                    [card.fieldNames.lastCheck]: Number(now.getTime())
+                    [card.fieldNames.rank]:       Number(newRank),
+                    [card.fieldNames.nextReview]:  nextReviewVal,
+                    [card.fieldNames.testTimes]:   Number((card.testTimes || 0) + 1),
+                    [card.fieldNames.lastCheck]:   Number(now.getTime()),
                 };
+                // optimistic cache update
                 try {
-                    await fetch(PROXY + `https://open.feishu.cn/open-apis/bitable/v1/apps/${LARK_CONFIG.APP_TOKEN}/tables/${LARK_CONFIG.TABLE_ID}/records/${card.record_id}`, {
-                        method: 'PUT',
-                        headers: { 'Authorization': `Bearer ${currentToken}`, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ fields })
+                    const cached = loadCache();
+                    if (cached) saveCache(cached.map(c =>
+                        c.record_id === card.record_id
+                            ? { ...c, rank: newRank, nextReview: nextReviewVal, testTimes: (c.testTimes||0)+1 }
+                            : c
+                    ));
+                } catch {}
+                try {
+                    await apiFetch(`/api/lark/records/${card.record_id}`, {
+                        method: 'PUT', body: JSON.stringify({ fields }),
                     });
-                } catch (e) {}
+                } catch (e) { console.error('Record update failed:', e); }
             };
 
+            // ── handle SRS button press ────────────────────────────────────────
             const handleSRS = useCallback((type) => {
                 if (queue.length === 0 || !isFlipped) return;
                 setLastAction(type);
-                setAiTip(null); 
-                setShowAi(false);
                 setTimeout(() => setLastAction(null), 300);
                 const [head, ...tail] = queue;
                 updateLarkRecord(head, type);
+                setDoneCards(prev => [...prev, { ...head, result: type }]);
                 let newQueue = [...tail];
                 if (type === 'again') {
-                    const updatedHead = { ...head, testTimes: head.testTimes + 1 };
-                    newQueue.splice(Math.min(3, newQueue.length), 0, updatedHead);
+                    const updated = { ...head, testTimes: head.testTimes + 1 };
+                    newQueue.splice(Math.min(3, newQueue.length), 0, updated);
                 }
                 if (newQueue.length === 0) setIsFinished(true);
-                else { setQueue(newQueue); setIsFlipped(false); }
-            }, [queue, isFlipped, larkToken]);
+                else { setQueue(newQueue); setIsFlipped(false); setShowPic(false); }
+            }, [queue, isFlipped]);
 
             useEffect(() => {
                 if (queue.length > 0 && !isFinished && !isFlipped) speak(queue[0].word);
@@ -300,181 +320,336 @@
             const currentCard = queue[0];
             const progress = totalCount > 0 ? ((totalCount - queue.length) / totalCount) * 100 : 0;
 
-            if (isFinished && totalCount > 0) {
+            // ════════════════════════════════════════════════════════════════════
+            // FINISHED SCREEN
+            // ════════════════════════════════════════════════════════════════════
+            if (view === 'review' && isFinished && totalCount > 0) {
+                const resultCounts = doneCards.reduce((acc, c) => {
+                    acc[c.result] = (acc[c.result] || 0) + 1; return acc;
+                }, {});
                 return (
-                    <div className="h-full flex items-center justify-center p-6 bg-slate-50">
-                        <div className="bg-white p-10 rounded-[3rem] shadow-2xl w-full max-w-sm text-center animate-pop border border-slate-100">
-                            <div className="w-24 h-24 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-6">
-                                <Icon name="party-popper" size={48} className="text-green-500" />
+                    <div className="h-full flex flex-col bg-slate-50">
+                        <div className="flex-1 overflow-y-auto custom-scroll p-6">
+                            <div className="bg-white p-8 rounded-[3rem] shadow-2xl w-full max-w-sm mx-auto text-center animate-pop border border-slate-100 mb-4">
+                                <div className="w-24 h-24 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-6">
+                                    <Icon name="party-popper" size={48} className="text-green-500" />
+                                </div>
+                                <h2 className="text-3xl font-black text-slate-800">複習大功告成！</h2>
+                                <p className="mt-2 text-slate-400 text-sm">今天共複習了 {totalCount} 個單詞</p>
+                                {/* result bar */}
+                                <div className="mt-6 grid grid-cols-4 gap-2">
+                                    {[['again','rose'],['hard','orange'],['good','emerald'],['easy','blue']].map(([k,c]) => (
+                                        <div key={k} className={`rounded-2xl py-3 bg-${c}-50 border border-${c}-100`}>
+                                            <div className={`text-lg font-black text-${c}-500`}>{resultCounts[k]||0}</div>
+                                            <div className={`text-[9px] font-black uppercase tracking-tighter text-${c}-400`}>{k}</div>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
-                            <h2 className="text-3xl font-black text-slate-800">複習大功告成</h2>
-                            <p className="mt-3 text-slate-400 text-sm">今天共複習了 {totalCount} 個單詞</p>
-                            <button onClick={() => window.location.reload()} className="mt-10 w-full py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-lg shadow-indigo-100 active:scale-95 transition-all">返回首頁</button>
+
+                            {/* word list */}
+                            <div className="bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden max-w-sm mx-auto mb-4">
+                                <div className="px-5 py-3 border-b border-slate-50 flex items-center gap-2">
+                                    <Icon name="list" size={14} className="text-indigo-400" />
+                                    <span className="text-[11px] font-black text-slate-500 uppercase tracking-wider">本次複習單詞</span>
+                                </div>
+                                {doneCards.map((c, i) => (
+                                    <div key={i} className="flex items-center px-5 py-3 border-b border-slate-50 last:border-0 gap-3">
+                                        <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${
+                                            c.result==='easy' ? 'bg-blue-50 text-blue-500' :
+                                            c.result==='good' ? 'bg-emerald-50 text-emerald-500' :
+                                            c.result==='hard' ? 'bg-orange-50 text-orange-500' :
+                                            'bg-rose-50 text-rose-500'
+                                        }`}>{c.result}</span>
+                                        <span className="font-black text-slate-700 text-sm">{c.word}</span>
+                                        <span className="text-slate-400 text-xs ml-auto truncate max-w-[100px]">{c.translation}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="p-4 grid grid-cols-2 gap-3 bg-white border-t border-slate-100">
+                            <button onClick={reviewAgain} className="py-4 bg-indigo-50 text-indigo-600 rounded-2xl font-black text-sm active:scale-95 transition-all border border-indigo-100">
+                                再複習一次
+                            </button>
+                            <button onClick={() => { setView('home'); setIsFinished(false); }} className="py-4 bg-indigo-600 text-white rounded-2xl font-black text-sm shadow-lg shadow-indigo-100 active:scale-95 transition-all">
+                                返回首頁
+                            </button>
                         </div>
                     </div>
                 );
             }
 
+            // ════════════════════════════════════════════════════════════════════
+            // REVIEW SCREEN
+            // ════════════════════════════════════════════════════════════════════
+            if (view === 'review' && queue.length > 0) {
+                return (
+                    <div className="h-full flex flex-col p-4 w-full max-w-md mx-auto">
+                        {/* header */}
+                        <div className="flex justify-between items-center mb-4 px-1">
+                            <button onClick={() => setView('home')} className="p-2 text-slate-400 active:scale-90 transition-all">
+                                <Icon name="chevron-left" size={22} />
+                            </button>
+                            <div className="text-center">
+                                <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                                    {totalCount - queue.length} / {totalCount}
+                                </div>
+                                <div className="w-32 bg-slate-200 h-1.5 rounded-full overflow-hidden mt-1">
+                                    <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-full transition-all duration-700" style={{ width: `${progress}%` }} />
+                                </div>
+                            </div>
+                            <div className="w-8" />
+                        </div>
+
+                        {/* card */}
+                        <div className="flex-1 relative perspective-1000 mb-4" onClick={() => setIsFlipped(!isFlipped)}>
+                            <div className={`relative w-full h-full transform-style-3d shadow-2xl rounded-[3rem] cursor-pointer ${isFlipped ? 'rotate-y-180' : ''}`}>
+
+                                {/* ── Front ── */}
+                                <div className="absolute w-full h-full backface-hidden bg-white rounded-[3rem] flex flex-col items-center justify-center p-8 border border-white">
+                                    <div className="absolute top-8 left-8 flex items-center gap-2">
+                                        <Icon name="award" size={14} className="text-indigo-500" />
+                                        <span className="text-[10px] font-black uppercase tracking-tighter text-slate-400">Level {Math.floor(currentCard.rank)}</span>
+                                    </div>
+                                    <div className="absolute bottom-10 left-8 flex items-center gap-2">
+                                        <Icon name="history" size={14} className="text-indigo-400" />
+                                        <span className="text-[10px] font-black uppercase tracking-tighter text-slate-400">×{currentCard.testTimes||0}</span>
+                                    </div>
+                                    <h2 className="text-5xl font-black text-slate-800 text-center leading-tight mb-8">{currentCard.word}</h2>
+                                    <button onClick={(e) => { e.stopPropagation(); speak(currentCard.word); }}
+                                        className="w-16 h-16 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center active:scale-90 transition-all border border-indigo-100">
+                                        <Icon name="volume-2" size={28} />
+                                    </button>
+                                    <div className="absolute bottom-10 right-8 text-[9px] font-bold text-slate-300 uppercase tracking-widest animate-pulse">Tap to Reveal</div>
+                                </div>
+
+                                {/* ── Back ── */}
+                                <div className="absolute w-full h-full backface-hidden bg-white rounded-[3rem] rotate-y-180 border border-white overflow-hidden shadow-inner">
+                                    <div className="card-back-container">
+
+                                        {/* scroll content */}
+                                        <div className="content-scroll-area custom-scroll">
+                                            <div className="px-8 py-4 flex flex-col justify-center bg-white border-b border-slate-50">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <span className="px-2 py-0.5 bg-indigo-100 text-indigo-600 text-[9px] font-black rounded-md uppercase tracking-tighter">
+                                                        {currentCard.pos || 'Unknown'}
+                                                    </span>
+                                                </div>
+                                                <h3 className="text-2xl font-black text-slate-800">{currentCard.translation}</h3>
+                                            </div>
+
+                                            <div className="px-8 flex items-center border-b border-slate-50 bg-slate-50/30 py-3">
+                                                <span className="text-[9px] font-black text-slate-400 w-20 flex-none uppercase tracking-tighter">Inflection</span>
+                                                <span className="text-slate-600 text-xs font-bold italic truncate">{currentCard.inflection || '---'}</span>
+                                            </div>
+
+                                            <div className="px-8 flex items-center border-b border-slate-50 bg-white py-3">
+                                                <span className="text-[9px] font-black text-slate-400 w-20 flex-none uppercase tracking-tighter">Collocation</span>
+                                                <span className="text-indigo-600 text-xs font-black truncate">{currentCard.collocation || '---'}</span>
+                                            </div>
+
+                                            <div className="px-8 py-5 bg-white relative">
+                                                <p className="text-slate-500 text-[11px] leading-relaxed font-medium italic pr-8">
+                                                    "{currentCard.example || 'No example sentence available.'}"
+                                                </p>
+                                                <button onClick={(e) => { e.stopPropagation(); speak(currentCard.example); }}
+                                                    className="absolute top-4 right-6 text-indigo-400 p-2">
+                                                    <Icon name="volume-2" size={16} />
+                                                </button>
+                                            </div>
+
+                                            {/* ── Picture section (foldable, Gemini position) ── */}
+                                            <div className="border-t border-slate-100 mt-auto" onClick={e => e.stopPropagation()}>
+                                                <button
+                                                    onClick={() => setShowPic(p => !p)}
+                                                    className="w-full py-3 flex items-center justify-center gap-2 text-slate-500 active:scale-95 transition-all bg-slate-50/80"
+                                                >
+                                                    <Icon name="image" size={13} className={currentCard.picUrl ? "text-indigo-500" : "text-slate-300"} />
+                                                    <span className="text-[10px] font-black uppercase tracking-widest">
+                                                        {currentCard.picUrl ? "Word Picture" : "No Picture"}
+                                                    </span>
+                                                    <Icon name={showPic ? "chevron-up" : "chevron-down"} size={13} className="ml-1 opacity-40" />
+                                                </button>
+                                                {showPic && currentCard.picUrl && (
+                                                    <div className="overflow-hidden bg-black" style={{height:'33vh'}}>
+                                                        <img
+                                                            src={(() => {
+                                                                const url = `${API_BASE}/api/lark/image/${encodeURIComponent(currentCard.picUrl)}`;
+                                                                console.log('🖼️ Loading image:', url);
+                                                                console.log('   Raw picUrl:', currentCard.picUrl);
+                                                                return url;
+                                                            })()}
+                                                            className="w-full h-full object-contain"
+                                                            alt={currentCard.word}
+                                                            onError={e => { 
+                                                                console.error('Image load failed:', currentCard.picUrl);
+                                                                e.target.parentNode.innerHTML = '<div class=\"flex flex-col items-center justify-center py-6 text-slate-300\"><span class=\"text-xs\">圖片載入失敗</span></div>'; 
+                                                            }}
+                                                        />
+                                                    </div>
+                                                )}
+                                                {showPic && !currentCard.picUrl && (
+                                                    <div className="flex flex-col items-center py-6 text-slate-300">
+                                                        <Icon name="image-off" size={24} />
+                                                        <span className="text-[10px] mt-1 font-bold uppercase tracking-widest">No Image in Lark</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {/* SRS buttons */}
+                                        <div className="p-4 bg-white border-t border-slate-100 grid grid-cols-4 gap-2 flex-none" onClick={e => e.stopPropagation()}>
+                                            {[
+                                                { id:'again', label:'Again', color:'text-rose-500' },
+                                                { id:'hard',  label:'Hard',  color:'text-orange-500' },
+                                                { id:'good',  label:'Good',  color:'text-emerald-500' },
+                                                { id:'easy',  label:'Easy',  color:'text-blue-500' },
+                                            ].map((btn, idx) => (
+                                                <button key={btn.id} onClick={() => handleSRS(btn.id)}
+                                                    className={`py-4 rounded-2xl flex flex-col items-center transition-all border border-slate-200 bg-slate-50 active:bg-indigo-600 active:text-white group ${lastAction===btn.id?'srs-btn-active':''}`}>
+                                                    <span className={`text-[9px] font-black uppercase mb-1 tracking-tighter ${btn.color} group-active:text-white`}>{btn.label}</span>
+                                                    <span className="text-[10px] font-black text-slate-300 group-active:text-white/50">{idx+1}</span>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            // ════════════════════════════════════════════════════════════════════
+            // HOME / SYNC SCREEN
+            // ════════════════════════════════════════════════════════════════════
+            const today = new Date().setHours(0, 0, 0, 0);
+            const dueCards    = allCards.filter(c => !c.nextReview || new Date(c.nextReview).getTime() <= today);
+            const notDueCards = allCards.filter(c => c.nextReview && new Date(c.nextReview).getTime() > today);
+            const hasDue = dueCards.length > 0;
+
             return (
-                <div className="h-full flex flex-col p-4 w-full max-w-md mx-auto">
-                    {/* Header */}
-                    <div className="flex justify-between items-center mb-6 px-1">
+                <div className="h-full flex flex-col w-full max-w-md mx-auto">
+                    {/* header */}
+                    <div className="flex justify-between items-center px-5 pt-5 pb-3">
                         <div>
                             <h1 className="text-xl font-black text-slate-800 flex items-center gap-2">
-                                <Icon name="Zap" size={20} className="text-indigo-600 fill-indigo-600" /> 
+                                <Icon name="zap" size={20} className="text-indigo-600 fill-indigo-600" />
                                 SRS Master
                             </h1>
-                            <p className="text-[10px] text-slate-400 font-bold tracking-widest uppercase">AI Memory Assistant</p>
+                            <p className="text-[10px] text-slate-400 font-bold tracking-widest uppercase">Memory Assistant</p>
+                            {cacheStatus === 'offline' && <span className="mt-0.5 inline-flex items-center gap-1 text-[9px] font-bold text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5"><Icon name="wifi-off" size={9} />離線快取</span>}
+                            {cacheStatus === 'stale'   && <span className="mt-0.5 inline-flex items-center gap-1 text-[9px] font-bold text-orange-600 bg-orange-50 border border-orange-200 rounded-full px-2 py-0.5"><Icon name="alert-circle" size={9} />舊版快取</span>}
+                            {cacheStatus === 'synced'  && <span className="mt-0.5 inline-flex items-center gap-1 text-[9px] font-bold text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5"><Icon name="check-circle" size={9} />已同步</span>}
                         </div>
-                        <button onClick={syncFromLark} disabled={loading} className="p-3 bg-white border border-slate-200 rounded-2xl shadow-sm active:scale-90 transition-all text-indigo-600 disabled:opacity-50">
-                            <Icon name={loading ? "loader-2" : "refresh-cw"} className={loading ? "animate-spin" : ""} size={18} />
+                        <button onClick={() => doSync(true)} disabled={loading}
+                            className="p-3 bg-white border border-slate-200 rounded-2xl shadow-sm active:scale-90 transition-all text-indigo-600 disabled:opacity-50">
+                            <Icon name={loading ? "loader-2" : "refresh-cw"} size={18} className={loading ? "animate-spin" : ""} />
                         </button>
                     </div>
 
-                    {queue.length > 0 ? (
-                        <div className="flex-1 flex flex-col min-h-0">
-                            <div className="mb-6 px-1">
-                                <div className="flex justify-between text-[10px] font-black text-slate-400 mb-2 uppercase">
-                                    <span>Progress: {totalCount - queue.length} / {totalCount}</span>
-                                    <span className="text-indigo-500 font-bold">Queue: {queue.length}</span>
-                                </div>
-                                <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden shadow-inner">
-                                    <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-full transition-all duration-700 ease-out" style={{ width: `${progress}%` }}></div>
-                                </div>
-                            </div>
+                    {/* scrollable body */}
+                    <div className="flex-1 overflow-y-auto custom-scroll px-4 pb-4 space-y-4">
 
-                            <div className="flex-1 relative perspective-1000 mb-6" onClick={() => setIsFlipped(!isFlipped)}>
-                                <div className={`relative w-full h-full transform-style-3d shadow-2xl rounded-[3rem] cursor-pointer ${isFlipped ? 'rotate-y-180' : ''}`}>
-                                    
-                                    {/* Front Side */}
-                                    <div className="absolute w-full h-full backface-hidden bg-white rounded-[3rem] flex flex-col items-center justify-center p-8 border border-white">
-                                        <div className="absolute top-8 left-8 flex items-center gap-2 text-slate-400">
-                                            <Icon name="award" size={14} className="text-indigo-500" />
-                                            <span className="text-[10px] font-black uppercase tracking-tighter">Level {Math.floor(currentCard.rank)}</span>
-                                        </div>
-                                        <div className="absolute bottom-10 left-8 flex items-center gap-2 text-slate-400">
-                                            <Icon name="history" size={14} className="text-indigo-400" />
-                                            <span className="text-[10px] font-black uppercase tracking-tighter">Times: {currentCard.testTimes || 0}</span>
-                                        </div>
-                                        <h2 className="text-5xl font-black text-slate-800 text-center leading-tight mb-8">{currentCard.word}</h2>
-                                        <button onClick={(e) => { e.stopPropagation(); speak(currentCard.word); }} className="w-16 h-16 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center active:scale-90 transition-all border border-indigo-100"><Icon name="volume-2" size={28}/></button>
-                                        <div className="absolute bottom-10 right-8 text-[9px] font-bold text-slate-300 uppercase tracking-widest animate-pulse">Tap to Reveal</div>
-                                    </div>
-
-                                    {/* Back Side */}
-                                    <div className="absolute w-full h-full backface-hidden bg-white rounded-[3rem] rotate-y-180 border border-white overflow-hidden shadow-inner">
-                                        <div className="card-back-container">
-                                            {/* 頂部圖片固定高度 */}
-                                            <div className="relative h-1/4 flex-none overflow-hidden">
-                                                <img 
-                                                    src={`https://loremflickr.com/600/400/${currentCard.word}?lock=${currentCard.record_id.length}`} 
-                                                    className="w-full h-full object-cover" 
-                                                    alt="Memory Anchor"
-                                                />
-                                                <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent"></div>
-                                            </div>
-                                            
-                                            {/* 中間滾動內容區 */}
-                                            <div className="content-scroll-area custom-scroll">
-                                                <div className="px-8 py-4 flex flex-col justify-center bg-white border-b border-slate-50">
-                                                    <div className="flex items-center gap-2 mb-1">
-                                                        <span className="px-2 py-0.5 bg-indigo-100 text-indigo-600 text-[9px] font-black rounded-md uppercase tracking-tighter">
-                                                            {currentCard.pos || 'Unknown'}
-                                                        </span>
-                                                    </div>
-                                                    <h3 className="text-2xl font-black text-slate-800">{currentCard.translation}</h3>
-                                                </div>
-
-                                                <div className="px-8 flex items-center border-b border-slate-50 bg-slate-50/30 py-3">
-                                                    <span className="text-[9px] font-black text-slate-400 w-20 flex-none uppercase tracking-tighter">Inflection</span>
-                                                    <span className="text-slate-600 text-xs font-bold italic truncate">{currentCard.inflection || '---'}</span>
-                                                </div>
-                                                
-                                                <div className="px-8 flex items-center border-b border-slate-50 bg-white py-3">
-                                                    <span className="text-[9px] font-black text-slate-400 w-20 flex-none uppercase tracking-tighter">Collocation</span>
-                                                    <span className="text-indigo-600 text-xs font-black truncate">{currentCard.collocation || '---'}</span>
-                                                </div>
-
-                                                <div className="px-8 py-5 bg-white relative">
-                                                    <p className="text-slate-500 text-[11px] leading-relaxed font-medium italic pr-8">
-                                                        "{currentCard.example || 'No example sentence available.'}"
-                                                    </p>
-                                                    <button onClick={(e) => {e.stopPropagation(); speak(currentCard.example);}} className="absolute top-4 right-6 text-indigo-400 hover:text-indigo-600 p-2"><Icon name="volume-2" size={16}/></button>
-                                                </div>
-
-                                                {/* ✨ AI 延伸區域 ✨ */}
-                                                <div className="px-6 bg-slate-50/80 border-t border-slate-100 mt-auto" onClick={e => e.stopPropagation()}>
-                                                    <button 
-                                                        onClick={handleAiEnhance}
-                                                        className="w-full py-4 flex items-center justify-center gap-2 text-indigo-600 group active:scale-95 transition-all"
-                                                    >
-                                                        <Icon name="sparkles" size={14} className={aiLoading ? "animate-pulse" : ""} />
-                                                        <span className="text-[10px] font-black uppercase tracking-widest">
-                                                            {aiLoading ? "Gemini Thinking..." : (aiTip ? "AI Memory Advice" : "Generate AI Mnemonic")}
-                                                        </span>
-                                                        <Icon name={showAi ? "chevron-up" : "chevron-down"} size={14} className="ml-1 opacity-40" />
-                                                    </button>
-                                                    
-                                                    <div className={`ai-expand ${showAi ? 'show' : ''}`}>
-                                                        <div className="bg-white rounded-2xl p-4 shadow-sm border border-indigo-50 mx-2">
-                                                            {aiLoading ? (
-                                                                <div className="flex flex-col items-center py-4 gap-2">
-                                                                    <div className="flex gap-1">
-                                                                        <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce"></div>
-                                                                        <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.2s]"></div>
-                                                                        <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.4s]"></div>
-                                                                    </div>
-                                                                </div>
-                                                            ) : (
-                                                                <p className="text-[11px] text-slate-700 leading-relaxed font-medium">
-                                                                    {aiTip}
-                                                                </p>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            {/* 底部按鈕固定 */}
-                                            <div className="p-4 bg-white border-t border-slate-100 grid grid-cols-4 gap-2 flex-none" onClick={e => e.stopPropagation()}>
-                                                {[
-                                                    { id: 'again', label: 'Again', color: 'text-rose-500' },
-                                                    { id: 'hard', label: 'Hard', color: 'text-orange-500' },
-                                                    { id: 'good', label: 'Good', color: 'text-emerald-500' },
-                                                    { id: 'easy', label: 'Easy', color: 'text-blue-500' }
-                                                ].map((btn, idx) => (
-                                                    <button 
-                                                        key={btn.id} 
-                                                        onClick={() => handleSRS(btn.id)} 
-                                                        className={`py-4 rounded-2xl flex flex-col items-center transition-all border border-slate-200 bg-slate-50 active:bg-indigo-600 active:text-white group ${lastAction === btn.id ? 'srs-btn-active' : ''}`}
-                                                    >
-                                                        <span className={`text-[9px] font-black uppercase mb-1 tracking-tighter ${btn.color} group-active:text-white`}>{btn.label}</span>
-                                                        <span className="text-[10px] font-black text-slate-300 group-active:text-white/50">{idx + 1}</span>
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    ) : (
-                        <div className="flex-1 flex flex-col items-center justify-center p-6">
-                             <div className="bg-white p-10 rounded-[3rem] border border-slate-100 text-center w-full shadow-xl animate-pop">
-                                <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-inner shadow-indigo-100/50">
+                        {/* ── no data state ── */}
+                        {allCards.length === 0 && (
+                            <div className="bg-white p-10 rounded-[3rem] border border-slate-100 text-center shadow-xl animate-pop mt-4">
+                                <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-inner shadow-indigo-100/50">
                                     <Icon name="database" size={40} className="text-indigo-500" />
                                 </div>
-                                <h3 className="text-2xl font-black text-slate-800 mb-3 tracking-tight">準備就緒</h3>
-                                <p className="text-slate-400 text-xs mb-10 font-medium px-4 leading-relaxed text-center">
-                                    系統已準備好同步數據，並啟動 <span className="text-indigo-600 font-bold tracking-widest uppercase">✨ Gemini 2.5 Flash</span> 記憶增強功能。
-                                </p>
-                                <button onClick={syncFromLark} className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-xl shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-3">
+                                <h3 className="text-2xl font-black text-slate-800 mb-3">準備就緒</h3>
+                                <p className="text-slate-400 text-xs mb-8 font-medium px-4 leading-relaxed">從 Lark 同步你的單詞表來開始學習</p>
+                                <button onClick={() => doSync(true)}
+                                    className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-xl shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-3">
                                     <Icon name="cloud-download" size={20} />
                                     同步數據並開始
                                 </button>
                             </div>
-                        </div>
-                    )}
+                        )}
+
+                        {/* ── stats row ── */}
+                        {allCards.length > 0 && (
+                            <div className="grid grid-cols-3 gap-3">
+                                {[
+                                    { label:'全部單詞', value: allCards.length, icon:'layers', color:'indigo' },
+                                    { label:'今日待複習', value: dueCards.length, icon:'calendar-check', color: dueCards.length>0?'rose':'emerald' },
+                                    { label:'未到期', value: notDueCards.length, icon:'clock', color:'slate' },
+                                ].map(s => (
+                                    <div key={s.label} className="bg-white rounded-2xl p-4 border border-slate-100 shadow-sm text-center">
+                                        <Icon name={s.icon} size={18} className={`text-${s.color}-500 mx-auto mb-1`} />
+                                        <div className={`text-2xl font-black text-${s.color}-600`}>{s.value}</div>
+                                        <div className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter mt-0.5">{s.label}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* ── today's word status list ── */}
+                        {allCards.length > 0 && (
+                            <div className="bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden">
+                                <div className="px-5 py-3 border-b border-slate-50 flex items-center gap-2">
+                                    <Icon name="list-checks" size={14} className="text-indigo-400" />
+                                    <span className="text-[11px] font-black text-slate-500 uppercase tracking-wider">今日單詞狀態</span>
+                                    <span className="ml-auto text-[9px] font-bold text-slate-300">{dueCards.length} 待複習</span>
+                                </div>
+
+                                {dueCards.length === 0 ? (
+                                    <div className="px-5 py-8 text-center">
+                                        <Icon name="check-circle-2" size={36} className="text-emerald-400 mx-auto mb-2" />
+                                        <p className="text-sm font-black text-slate-600">今天沒有待複習的單詞！</p>
+                                        <p className="text-xs text-slate-400 mt-1">可以加入更多單詞繼續練習</p>
+                                    </div>
+                                ) : (
+                                    <div className="max-h-52 overflow-y-auto status-scroll">
+                                        {dueCards.map((c, i) => (
+                                            <div key={c.record_id} className="flex items-center px-5 py-2.5 border-b border-slate-50 last:border-0 gap-3">
+                                                <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-md ${rankColor(c.rank)}`}>
+                                                    Lv{Math.floor(c.rank)}
+                                                </span>
+                                                <span className="font-black text-slate-700 text-sm">{c.word}</span>
+                                                <span className="text-slate-400 text-xs ml-auto truncate max-w-[90px]">{c.translation}</span>
+                                                <span className="text-[9px] text-slate-300 font-bold flex-none">×{c.testTimes}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* ── action buttons ── */}
+                        {allCards.length > 0 && (
+                            <div className="space-y-3">
+                                {hasDue ? (
+                                    <button onClick={() => { buildQueue(allCards, true); }}
+                                        className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-xl shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-3">
+                                        <Icon name="play" size={20} />
+                                        開始複習 ({dueCards.length} 個單詞)
+                                    </button>
+                                ) : (
+                                    /* no words due — show two alternatives */
+                                    <div className="space-y-3">
+                                        <div className="bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 text-center">
+                                            <p className="text-emerald-600 font-black text-sm">🎉 今天的複習全部完成！</p>
+                                            <p className="text-emerald-500 text-xs mt-0.5">選擇下方選項繼續練習</p>
+                                        </div>
+                                        <button onClick={reviewAgain}
+                                            className="w-full py-4 bg-white border-2 border-indigo-200 text-indigo-600 rounded-2xl font-black transition-all active:scale-95 flex items-center justify-center gap-3 shadow-sm">
+                                            <Icon name="rotate-ccw" size={18} />
+                                            再複習今天的單詞
+                                        </button>
+                                        <button onClick={addMoreWords}
+                                            className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-xl shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-3">
+                                            <Icon name="plus-circle" size={18} />
+                                            加入 20 個新單詞
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                    </div>
                 </div>
             );
         };
