@@ -129,6 +129,22 @@
                 }
             }, []);
 
+            // ── preload images for next 3 cards ────────────────────────────────────
+            useEffect(() => {
+                if (queue.length === 0) return;
+                
+                // 预加载当前卡片后面的 3 张图片（共 4 张：当前 + 后 3 张）
+                const cardsToPreload = queue.slice(0, 4);
+                
+                cardsToPreload.forEach((card, index) => {
+                    if (card.picUrl) {
+                        const img = new Image();
+                        img.src = `${API_BASE}/api/lark/image/${encodeURIComponent(card.picUrl)}`;
+                        // 静默预加载，不需要处理错误
+                    }
+                });
+            }, [queue[0]?.record_id]); // 当前卡片变化时触发预加载
+
             const speak = useCallback((text) => {
                 if (!text || !window.speechSynthesis) return;
                 window.speechSynthesis.cancel();
@@ -459,40 +475,24 @@
                                                 </button>
                                             </div>
 
-                                            {/* ── Picture section (foldable, Gemini position) ── */}
+                                            {/* ── Picture section (auto-expanded) ── */}
                                             <div className="border-t border-slate-100 mt-auto" onClick={e => e.stopPropagation()}>
-                                                <button
-                                                    onClick={() => setShowPic(p => !p)}
-                                                    className="w-full py-3 flex items-center justify-center gap-2 text-slate-500 active:scale-95 transition-all bg-slate-50/80"
-                                                >
-                                                    <Icon name="image" size={13} className={currentCard.picUrl ? "text-indigo-500" : "text-slate-300"} />
-                                                    <span className="text-[10px] font-black uppercase tracking-widest">
-                                                        {currentCard.picUrl ? "Word Picture" : "No Picture"}
-                                                    </span>
-                                                    <Icon name={showPic ? "chevron-up" : "chevron-down"} size={13} className="ml-1 opacity-40" />
-                                                </button>
-                                                {showPic && currentCard.picUrl && (
+                                                {currentCard.picUrl ? (
                                                     <div className="overflow-hidden bg-black" style={{height:'33vh'}}>
                                                         <img
-                                                            src={(() => {
-                                                                const url = `${API_BASE}/api/lark/image/${encodeURIComponent(currentCard.picUrl)}`;
-                                                                console.log('🖼️ Loading image:', url);
-                                                                console.log('   Raw picUrl:', currentCard.picUrl);
-                                                                return url;
-                                                            })()}
+                                                            src={`${API_BASE}/api/lark/image/${encodeURIComponent(currentCard.picUrl)}`}
                                                             className="w-full h-full object-contain"
                                                             alt={currentCard.word}
                                                             onError={e => { 
                                                                 console.error('Image load failed:', currentCard.picUrl);
-                                                                e.target.parentNode.innerHTML = '<div class=\"flex flex-col items-center justify-center py-6 text-slate-300\"><span class=\"text-xs\">圖片載入失敗</span></div>'; 
+                                                                e.target.parentNode.innerHTML = '<div class=\"flex flex-col items-center justify-center h-full text-slate-300\"><span class=\"text-xs\">圖片載入失敗</span></div>'; 
                                                             }}
                                                         />
                                                     </div>
-                                                )}
-                                                {showPic && !currentCard.picUrl && (
-                                                    <div className="flex flex-col items-center py-6 text-slate-300">
+                                                ) : (
+                                                    <div className="flex flex-col items-center justify-center py-8 text-slate-300 bg-slate-50">
                                                         <Icon name="image-off" size={24} />
-                                                        <span className="text-[10px] mt-1 font-bold uppercase tracking-widest">No Image in Lark</span>
+                                                        <span className="text-[10px] mt-2 font-bold uppercase tracking-widest">No Image</span>
                                                     </div>
                                                 )}
                                             </div>
