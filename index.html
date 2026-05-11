@@ -117,6 +117,8 @@
             const [cacheStatus, setCacheStatus] = useState('idle');
             const [view, setView]             = useState('home'); // 'home' | 'review'
             const [dueSnapshot, setDueSnapshot]   = useState([]); // original due list for "review again"
+            const [currentImageDataUrl, setCurrentImageDataUrl] = useState(null); // 当前卡片图片 data URL
+            const imageCache = useRef({}); // picUrl → dataUrl 缓存，避免重复下载
 
             // ── mount: auto-load cache ─────────────────────────────────────────
             useEffect(() => {
@@ -129,21 +131,46 @@
                 }
             }, []);
 
-            // ── preload images for next 3 cards ────────────────────────────────────
+            // ── 图片加载：fetch JSON { dataUrl } 后设 state，并预加载后 3 张 ──────────
             useEffect(() => {
                 if (queue.length === 0) return;
-                
-                // 预加载当前卡片后面的 3 张图片（共 4 张：当前 + 后 3 张）
-                const cardsToPreload = queue.slice(0, 4);
-                
-                cardsToPreload.forEach((card, index) => {
-                    if (card.picUrl) {
-                        const img = new Image();
-                        img.src = `${API_BASE}/api/lark/image/${encodeURIComponent(card.picUrl)}`;
-                        // 静默预加载，不需要处理错误
+
+                const current = queue[0];
+                let cancelled = false;
+
+                // 设置当前卡片图片
+                if (current?.picUrl) {
+                    if (imageCache.current[current.picUrl]) {
+                        // 已缓存，直接用
+                        setCurrentImageDataUrl(imageCache.current[current.picUrl]);
+                    } else {
+                        setCurrentImageDataUrl(null); // 先清空，等 fetch 完成
+                        fetch(`${API_BASE}/api/lark/image/${encodeURIComponent(current.picUrl)}`)
+                            .then(r => r.json())
+                            .then(d => {
+                                if (!cancelled && d.dataUrl) {
+                                    imageCache.current[current.picUrl] = d.dataUrl;
+                                    setCurrentImageDataUrl(d.dataUrl);
+                                }
+                            })
+                            .catch(() => {});
+                    }
+                } else {
+                    setCurrentImageDataUrl(null);
+                }
+
+                // 静默预加载后 3 张
+                queue.slice(1, 4).forEach(card => {
+                    if (card.picUrl && !imageCache.current[card.picUrl]) {
+                        fetch(`${API_BASE}/api/lark/image/${encodeURIComponent(card.picUrl)}`)
+                            .then(r => r.json())
+                            .then(d => { if (d.dataUrl) imageCache.current[card.picUrl] = d.dataUrl; })
+                            .catch(() => {});
                     }
                 });
-            }, [queue[0]?.record_id]); // 当前卡片变化时触发预加载
+
+                return () => { cancelled = true; };
+            }, [queue[0]?.record_id]); // 当前卡片变化时触发
 
             const speak = useCallback((text) => {
                 if (!text || !window.speechSynthesis) return;
@@ -479,15 +506,17 @@
                                             <div className="border-t border-slate-100 mt-auto" onClick={e => e.stopPropagation()}>
                                                 {currentCard.picUrl ? (
                                                     <div className="overflow-hidden bg-black" style={{height:'33vh'}}>
-                                                        <img
-                                                            src={`${API_BASE}/api/lark/image/${encodeURIComponent(currentCard.picUrl)}`}
-                                                            className="w-full h-full object-contain"
-                                                            alt={currentCard.word}
-                                                            onError={e => { 
-                                                                console.error('Image load failed:', currentCard.picUrl);
-                                                                e.target.parentNode.innerHTML = '<div class=\"flex flex-col items-center justify-center h-full text-slate-300\"><span class=\"text-xs\">圖片載入失敗</span></div>'; 
-                                                            }}
-                                                        />
+                                                        {currentImageDataUrl ? (
+                                                            <img
+                                                                src={currentImageDataUrl}
+                                                                className="w-full h-full object-contain"
+                                                                alt={currentCard.word}
+                                                            />
+                                                        ) : (
+                                                            <div className="flex flex-col items-center justify-center h-full text-slate-400">
+                                                                <span className="text-xs">圖片載入中…</span>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 ) : (
                                                     <div className="flex flex-col items-center justify-center py-8 text-slate-300 bg-slate-50">
