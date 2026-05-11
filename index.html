@@ -119,6 +119,15 @@
             const [dueSnapshot, setDueSnapshot]   = useState([]); // original due list for "review again"
             const [currentImageDataUrl, setCurrentImageDataUrl] = useState(null); // 当前卡片图片 data URL
             const imageCache = useRef({}); // picUrl → dataUrl 缓存，避免重复下载
+            const voicesRef = useRef([]);   // 預載語音清單
+
+            // 預載可用語音（瀏覽器異步載入，需監聽事件）
+            useEffect(() => {
+                const loadVoices = () => { voicesRef.current = window.speechSynthesis.getVoices(); };
+                loadVoices();
+                window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
+                return () => window.speechSynthesis.removeEventListener('voiceschanged', loadVoices);
+            }, []);
 
             // ── mount: auto-load cache ─────────────────────────────────────────
             useEffect(() => {
@@ -179,6 +188,19 @@
                 const isCN = /[\u4e00-\u9fa5]/.test(text);
                 u.lang = isCN ? 'zh-TW' : 'en-US';
                 u.rate = isCN ? 1.0 : 0.85;
+
+                // \u512a\u5148\u9078\u7528\u9ad8\u54c1\u8cea\u771f\u4eba\u8a9e\u97f3\uff08Enhanced / Premium / Siri\uff09
+                const voices = voicesRef.current;
+                if (voices.length > 0) {
+                    const targetLang = isCN ? 'zh' : 'en';
+                    const preferred =
+                        voices.find(v => v.lang.startsWith(targetLang) &&
+                            (v.name.includes('Enhanced') || v.name.includes('Premium') || v.name.toLowerCase().includes('siri'))) ||
+                        voices.find(v => v.lang === u.lang) ||
+                        voices.find(v => v.lang.startsWith(targetLang));
+                    if (preferred) u.voice = preferred;
+                }
+
                 window.speechSynthesis.speak(u);
             }, []);
 
