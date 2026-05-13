@@ -210,8 +210,20 @@
                 currentSrcRef.current = null;
                 window.speechSynthesis?.cancel();
 
+                // \u26a0\ufe0f iOS \u95dc\u9375\uff1a\u5fc5\u9808\u5728\u4efb\u4f55 await \u4e4b\u524d\u540c\u6b65\u547c\u53eb ctx.resume()
+                // \u4e00\u65e6\u9032\u5165 async/await\uff0c\u700f\u89bd\u5668\u5c31\u4e0d\u518d\u8a8d\u70ba\u662f\u4f7f\u7528\u8005\u624b\u52e2
+                if (!audioCtxRef.current) {
+                    audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                const ctx = audioCtxRef.current;
+                const resumePromise = ctx.resume(); // \u540c\u6b65\u555f\u52d5\uff0c\u4e0d await
+
                 try {
-                    const res = await fetch(`${API_BASE}/api/tts?text=${encodeURIComponent(text)}`);
+                    // fetch \u8207 resume \u540c\u6642\u9032\u884c
+                    const [res] = await Promise.all([
+                        fetch(`${API_BASE}/api/tts?text=${encodeURIComponent(text)}`),
+                        resumePromise,
+                    ]);
                     if (!res.ok) throw new Error(`TTS ${res.status}`);
                     const { audioData } = await res.json();
 
@@ -220,13 +232,6 @@
                     const binary = atob(base64);
                     const bytes  = new Uint8Array(binary.length);
                     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-                    // \u78ba\u4fdd AudioContext \u5b58\u5728\u4e26\u904b\u884c\uff08\u624b\u6a5f\u9996\u6b21\u53ef\u80fd\u9084\u6c92\u521d\u59cb\u5316\uff09
-                    if (!audioCtxRef.current) {
-                        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
-                    }
-                    const ctx = audioCtxRef.current;
-                    if (ctx.state === 'suspended') await ctx.resume();
 
                     const buffer = await ctx.decodeAudioData(bytes.buffer);
                     const src    = ctx.createBufferSource();
@@ -242,16 +247,6 @@
                     const isCN = /[\u4e00-\u9fa5]/.test(text);
                     u.lang = isCN ? 'zh-TW' : 'en-US';
                     u.rate = isCN ? 1.0 : 0.85;
-                    const voices = voicesRef.current;
-                    if (voices.length > 0) {
-                        const targetLang = isCN ? 'zh' : 'en';
-                        const preferred =
-                            voices.find(v => v.lang.startsWith(targetLang) &&
-                                (v.name.includes('Enhanced') || v.name.includes('Premium') || v.name.toLowerCase().includes('siri'))) ||
-                            voices.find(v => v.lang === u.lang) ||
-                            voices.find(v => v.lang.startsWith(targetLang));
-                        if (preferred) u.voice = preferred;
-                    }
                     window.speechSynthesis.speak(u);
                 }
             }, []);
@@ -427,12 +422,14 @@
                     newQueue.splice(Math.min(3, newQueue.length), 0, updated);
                 }
                 if (newQueue.length === 0) setIsFinished(true);
-                else { setQueue(newQueue); setIsFlipped(false); setShowPic(false); }
-            }, [queue, isFlipped]);
-
-            useEffect(() => {
-                if (queue.length > 0 && !isFinished && !isFlipped) speak(queue[0].word);
-            }, [queue[0], isFlipped, isFinished]);
+                else {
+                    setQueue(newQueue);
+                    setIsFlipped(false);
+                    setShowPic(false);
+                    // ⚠️ iOS 必須在使用者手勢（此處）直接呼叫 speak，不能靠 useEffect
+                    speak(newQueue[0].word);
+                }
+            }, [queue, isFlipped, speak]);
 
             const currentCard = queue[0];
             const progress = totalCount > 0 ? ((totalCount - queue.length) / totalCount) * 100 : 0;
