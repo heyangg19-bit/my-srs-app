@@ -181,29 +181,62 @@
                 return () => { cancelled = true; };
             }, [queue[0]?.record_id]); // 当前卡片变化时触发
 
-            const currentAudio = useRef(null); // \u8ffd\u8e64\u76ee\u524d\u64ad\u653e\u7684 Audio \u7269\u4ef6
+            const audioCtxRef    = useRef(null); // Web AudioContext\uff08\u624b\u6a5f\u9700\u8981\uff09
+            const currentSrcRef  = useRef(null); // \u76ee\u524d\u64ad\u653e\u7684 AudioBufferSourceNode
+
+            // \u2500\u2500 \u7b2c\u4e00\u6b21\u4f7f\u7528\u8005\u9ede\u64ca\u6642\u521d\u59cb\u5316 AudioContext\uff08iOS \u9650\u5236\uff09\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+            useEffect(() => {
+                const init = () => {
+                    if (!audioCtxRef.current) {
+                        try {
+                            audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+                        } catch(e) {}
+                    }
+                    if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
+                };
+                document.addEventListener('touchstart', init, { once: true });
+                document.addEventListener('click',      init, { once: true });
+                return () => {
+                    document.removeEventListener('touchstart', init);
+                    document.removeEventListener('click',      init);
+                };
+            }, []);
 
             const speak = useCallback(async (text) => {
                 if (!text) return;
 
-                // \u505c\u6b62\u76ee\u524d\u64ad\u653e\u4e2d\u7684\u97f3\u8a0a
-                if (currentAudio.current) {
-                    currentAudio.current.pause();
-                    currentAudio.current = null;
-                }
+                // \u505c\u6b62\u76ee\u524d\u64ad\u653e
+                try { currentSrcRef.current?.stop(); } catch(e) {}
+                currentSrcRef.current = null;
                 window.speechSynthesis?.cancel();
 
                 try {
-                    // \u547c\u53eb\u963f\u91cc\u96f2 TTS API
                     const res = await fetch(`${API_BASE}/api/tts?text=${encodeURIComponent(text)}`);
-                    if (!res.ok) throw new Error(`TTS status ${res.status}`);
+                    if (!res.ok) throw new Error(`TTS ${res.status}`);
                     const { audioData } = await res.json();
-                    const audio = new Audio(audioData);
-                    currentAudio.current = audio;
-                    audio.play();
+
+                    // base64 data URL \u2192 ArrayBuffer
+                    const base64 = audioData.split(',')[1];
+                    const binary = atob(base64);
+                    const bytes  = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+                    // \u78ba\u4fdd AudioContext \u5b58\u5728\u4e26\u904b\u884c\uff08\u624b\u6a5f\u9996\u6b21\u53ef\u80fd\u9084\u6c92\u521d\u59cb\u5316\uff09
+                    if (!audioCtxRef.current) {
+                        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                    const ctx = audioCtxRef.current;
+                    if (ctx.state === 'suspended') await ctx.resume();
+
+                    const buffer = await ctx.decodeAudioData(bytes.buffer);
+                    const src    = ctx.createBufferSource();
+                    src.buffer   = buffer;
+                    src.connect(ctx.destination);
+                    currentSrcRef.current = src;
+                    src.start();
+
                 } catch (e) {
-                    console.warn('\u963f\u91cc\u96f2 TTS \u5931\u6557\uff0c\u6539\u7528\u7cfb\u7d71\u8a9e\u97f3:', e);
-                    // Fallback\uff1a\u700f\u89bd\u5668 Web Speech API
+                    console.warn('TTS \u5931\u6557\uff0c\u6539\u7528\u7cfb\u7d71\u8a9e\u97f3:', e);
                     if (!window.speechSynthesis) return;
                     const u = new SpeechSynthesisUtterance(text);
                     const isCN = /[\u4e00-\u9fa5]/.test(text);
